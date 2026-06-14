@@ -54,6 +54,9 @@
       height: 100%;
       outline: none;
       background: #12151f;
+      touch-action: none;
+      user-select: none;
+      -webkit-user-select: none;
     }
 
     #overlay {
@@ -74,6 +77,7 @@
     #overlay strong { color: #fff; }
     #overlay small { color: #9fb3c8; }
   </style>
+  <link rel="stylesheet" href="./mobile.css" media="(max-width: 700px)" />
 </head>
 <body>
   <header>
@@ -85,7 +89,7 @@
     <canvas id="canvas" tabindex="0"></canvas>
     <div id="overlay">
       <strong>Loading Python GUI runtime…</strong><br />
-      <small>The first load downloads Pyodide and the imgui-bundle WebAssembly wheel from public CDNs/PyPI. Use arrow keys or WASD after the game starts.</small>
+      <small>The first load downloads Pyodide and the imgui-bundle WebAssembly wheel from public CDNs/PyPI. Use arrow keys, WASD, or swipe after the game starts.</small>
     </div>
   </main>
 
@@ -116,11 +120,19 @@
     resizeCanvasToDisplaySize();
 
     window.__game2048Keys = [];
+    window.__queue2048Input = (input) => {
+      window.__game2048Keys.push(input);
+    };
     window.__pop2048Keys = () => {
       const keys = window.__game2048Keys.slice();
       window.__game2048Keys.length = 0;
       return JSON.stringify(keys);
     };
+    window.__game2048Viewport = () => JSON.stringify({
+      width: canvas.clientWidth,
+      height: canvas.clientHeight,
+      compact: window.matchMedia("(max-width: 700px)").matches
+    });
 
     const keyMap = new Map([
       ["ArrowUp", "up"], ["w", "up"], ["W", "up"],
@@ -134,9 +146,64 @@
       const mapped = keyMap.get(event.key);
       if (mapped) {
         event.preventDefault();
-        window.__game2048Keys.push(mapped);
+        window.__queue2048Input(mapped);
       }
     }, { passive: false });
+
+    const minSwipeDistance = 36;
+    let touchStart = null;
+
+    function resetTouchStart() {
+      touchStart = null;
+    }
+
+    canvas.addEventListener("touchstart", (event) => {
+      if (event.touches.length !== 1) {
+        resetTouchStart();
+        return;
+      }
+
+      const touch = event.touches[0];
+      touchStart = {
+        x: touch.clientX,
+        y: touch.clientY
+      };
+      canvas.focus();
+      event.preventDefault();
+    }, { passive: false });
+
+    canvas.addEventListener("touchmove", (event) => {
+      if (touchStart) {
+        event.preventDefault();
+      }
+    }, { passive: false });
+
+    canvas.addEventListener("touchend", (event) => {
+      if (!touchStart || event.changedTouches.length === 0) {
+        resetTouchStart();
+        return;
+      }
+
+      const touch = event.changedTouches[0];
+      const dx = touch.clientX - touchStart.x;
+      const dy = touch.clientY - touchStart.y;
+      const absX = Math.abs(dx);
+      const absY = Math.abs(dy);
+      resetTouchStart();
+
+      if (Math.max(absX, absY) < minSwipeDistance) {
+        return;
+      }
+
+      event.preventDefault();
+      if (absX > absY) {
+        window.__queue2048Input(dx > 0 ? "right" : "left");
+      } else {
+        window.__queue2048Input(dy > 0 ? "down" : "up");
+      }
+    }, { passive: false });
+
+    canvas.addEventListener("touchcancel", resetTouchStart);
 
     const pythonCode = String.raw`
 import json
@@ -146,8 +213,9 @@ from js import window
 from imgui_bundle import imgui, immapp, hello_imgui
 
 SIZE = 4
-CELL = 92
-GAP = 8
+DESKTOP_CELL = 92
+DESKTOP_WINDOW_WIDTH = 545
+DESKTOP_WINDOW_HEIGHT = 650
 random.seed()
 
 board = [[0] * SIZE for _ in range(SIZE)]
@@ -258,8 +326,26 @@ def process_keyboard():
         else:
             move(key)
 
-def tile_label(value, r, c):
-    return (str(value) if value else " ") + f"##tile_{r}_{c}"
+def viewport():
+    data = json.loads(window.__game2048Viewport())
+    width = max(1, int(data["width"]))
+    height = max(1, int(data["height"]))
+    compact = bool(data["compact"]) or width < 700
+    return width, height, compact
+
+def window_layout():
+    width, height, compact = viewport()
+    margin = 6 if compact else 14
+    available_width = max(1, width - margin * 2)
+    available_height = max(1, height - margin * 2)
+    window_width = min(DESKTOP_WINDOW_WIDTH, available_width)
+    window_height = min(DESKTOP_WINDOW_HEIGHT, available_height)
+    return {
+        "margin": margin,
+        "width": window_width,
+        "height": window_height,
+        "compact": compact,
+    }
 
 def tile_color(value):
     # Dear ImGui expects normalized RGBA floats.
@@ -279,48 +365,102 @@ def tile_color(value):
     }
     return palette.get(value, (0.30, 0.24, 0.55, 1.0))
 
+def vec_xy(value):
+    if hasattr(value, "x"):
+        return value.x, value.y
+    return value[0], value[1]
+
+def text_size(text, font_size):
+    base_width, base_height = vec_xy(imgui.calc_text_size(text))
+    scale = font_size / imgui.get_font_size()
+    return base_width * scale, base_height * scale
+
+def draw_large_tile_number(value, cell):
+    if not value:
+        return
+
+    draw_list = imgui.get_window_draw_list()
+    tile_min = imgui.get_item_rect_min()
+    tile_max = imgui.get_item_rect_max()
+    min_x, min_y = vec_xy(tile_min)
+    max_x, max_y = vec_xy(tile_max)
+
+    text = str(value)
+    tile_width = max_x - min_x
+    tile_height = max_y - min_y
+    if value < 128:
+        font_size = cell * 0.50
+    elif value < 1024:
+        font_size = cell * 0.43
+    else:
+        font_size = cell * 0.36
+    width, height = text_size(text, font_size)
+    x = min_x + (tile_width - width) / 2
+    y = min_y + (tile_height - height) / 2
+    draw_list.add_text(imgui.get_font(), font_size, (x, y), 0xffffffff, text)
+
+def board_metrics():
+    available_width, _ = vec_xy(imgui.get_content_region_avail())
+    compact = available_width < 500
+    gap = 6 if compact else 8
+    cell = int((available_width - gap * (SIZE - 1)) / SIZE)
+    cell = max(36, min(DESKTOP_CELL, cell))
+    return cell, gap
+
 def draw_board():
+    cell, gap = board_metrics()
     for r in range(SIZE):
         for c in range(SIZE):
             value = board[r][c]
+            label = "##tile_{r}_{c}".format(r=r, c=c)
             imgui.push_style_color(imgui.Col_.button, tile_color(value))
             imgui.push_style_color(imgui.Col_.button_hovered, tile_color(value))
             imgui.push_style_color(imgui.Col_.button_active, tile_color(value))
-            imgui.button(tile_label(value, r, c), (CELL, CELL))
+            imgui.button(label, (cell, cell))
+            draw_large_tile_number(value, cell)
             imgui.pop_style_color(3)
             if c + 1 < SIZE:
-                imgui.same_line(0, GAP)
+                imgui.same_line(0, gap)
 
 def controls():
-    if imgui.button("↑##up", (46, 34)):
+    if imgui.button("^##up", (46, 34)):
         move("up")
-    if imgui.button("←##left", (46, 34)):
+    if imgui.button("<##left", (46, 34)):
         move("left")
     imgui.same_line()
-    if imgui.button("↓##down", (46, 34)):
+    if imgui.button("v##down", (46, 34)):
         move("down")
     imgui.same_line()
-    if imgui.button("→##right", (46, 34)):
+    if imgui.button(">##right", (46, 34)):
         move("right")
 
 def gui():
     process_keyboard()
 
-    imgui.set_next_window_size((545, 650), imgui.Cond_.once)
+    layout = window_layout()
+    imgui.set_next_window_pos((layout["margin"], layout["margin"]), imgui.Cond_.always)
+    imgui.set_next_window_size((layout["width"], layout["height"]), imgui.Cond_.always)
     imgui.begin("2048 in Python / Dear ImGui / WebAssembly")
 
-    imgui.text("2048")
-    imgui.same_line()
-    imgui.text(f"Score: {score}")
-    imgui.same_line()
-    imgui.text(f"Best: {best}")
-    imgui.same_line()
-    imgui.text(f"Moves: {moves}")
+    if layout["compact"]:
+        imgui.text(f"2048  Score: {score}")
+        imgui.text(f"Best: {best}  Moves: {moves}")
+    else:
+        imgui.text("2048")
+        imgui.same_line()
+        imgui.text(f"Score: {score}")
+        imgui.same_line()
+        imgui.text(f"Best: {best}")
+        imgui.same_line()
+        imgui.text(f"Moves: {moves}")
 
     if imgui.button("New Game"):
         reset()
-    imgui.same_line()
-    imgui.text("Keyboard: arrows/WASD, R to restart")
+    if not layout["compact"]:
+        imgui.same_line()
+        imgui.text("Keyboard: arrows/WASD, swipe, R to restart")
+    else:
+        imgui.text("Swipe to move. R restarts.")
 
     imgui.separator()
     draw_board()
