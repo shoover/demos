@@ -1,0 +1,382 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>2048 with imgui-bundle + Pyodide</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #0f1117;
+      color: #e6edf3;
+    }
+
+    html, body {
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      overflow: hidden;
+    }
+
+    body {
+      display: grid;
+      grid-template-rows: auto 1fr;
+    }
+
+    header {
+      padding: 12px 16px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+      background: linear-gradient(180deg, rgba(255,255,255,0.06), rgba(255,255,255,0.02));
+    }
+
+    h1 {
+      margin: 0 0 4px;
+      font-size: 16px;
+      font-weight: 650;
+    }
+
+    #status {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 12px;
+      color: #9fb3c8;
+      white-space: pre-wrap;
+    }
+
+    main {
+      position: relative;
+      min-height: 0;
+    }
+
+    #canvas {
+      display: block;
+      width: 100%;
+      height: 100%;
+      outline: none;
+      background: #12151f;
+    }
+
+    #overlay {
+      position: absolute;
+      inset: 14px auto auto 14px;
+      max-width: min(620px, calc(100vw - 28px));
+      padding: 10px 12px;
+      border: 1px solid rgba(255, 255, 255, 0.14);
+      border-radius: 10px;
+      background: rgba(15, 17, 23, 0.78);
+      box-shadow: 0 8px 28px rgba(0, 0, 0, 0.32);
+      backdrop-filter: blur(10px);
+      font-size: 13px;
+      line-height: 1.4;
+      pointer-events: none;
+    }
+
+    #overlay strong { color: #fff; }
+    #overlay small { color: #9fb3c8; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>2048 with imgui-bundle + Pyodide</h1>
+    <div id="status">Starting…</div>
+  </header>
+
+  <main>
+    <canvas id="canvas" tabindex="0"></canvas>
+    <div id="overlay">
+      <strong>Loading Python GUI runtime…</strong><br />
+      <small>The first load downloads Pyodide and the imgui-bundle WebAssembly wheel from public CDNs/PyPI. Use arrow keys or WASD after the game starts.</small>
+    </div>
+  </main>
+
+  <script type="module">
+    import { loadPyodide } from "https://cdn.jsdelivr.net/pyodide/v314.0.0/full/pyodide.mjs";
+
+    const statusEl = document.getElementById("status");
+    const overlayEl = document.getElementById("overlay");
+    const canvas = document.getElementById("canvas");
+
+    function log(message) {
+      statusEl.textContent = message;
+      console.log(message);
+    }
+
+    function resizeCanvasToDisplaySize() {
+      const dpr = window.devicePixelRatio || 1;
+      const width = Math.max(1, Math.floor(canvas.clientWidth * dpr));
+      const height = Math.max(1, Math.floor(canvas.clientHeight * dpr));
+      if (canvas.width !== width || canvas.height !== height) {
+        canvas.width = width;
+        canvas.height = height;
+      }
+    }
+
+    window.addEventListener("resize", resizeCanvasToDisplaySize);
+    document.addEventListener("contextmenu", (event) => event.preventDefault());
+    resizeCanvasToDisplaySize();
+
+    window.__game2048Keys = [];
+    window.__pop2048Keys = () => {
+      const keys = window.__game2048Keys.slice();
+      window.__game2048Keys.length = 0;
+      return JSON.stringify(keys);
+    };
+
+    const keyMap = new Map([
+      ["ArrowUp", "up"], ["w", "up"], ["W", "up"],
+      ["ArrowDown", "down"], ["s", "down"], ["S", "down"],
+      ["ArrowLeft", "left"], ["a", "left"], ["A", "left"],
+      ["ArrowRight", "right"], ["d", "right"], ["D", "right"],
+      ["r", "restart"], ["R", "restart"]
+    ]);
+
+    window.addEventListener("keydown", (event) => {
+      const mapped = keyMap.get(event.key);
+      if (mapped) {
+        event.preventDefault();
+        window.__game2048Keys.push(mapped);
+      }
+    }, { passive: false });
+
+    const pythonCode = String.raw`
+import json
+import random
+import time
+from js import window
+from imgui_bundle import imgui, immapp, hello_imgui
+
+SIZE = 4
+CELL = 92
+GAP = 8
+random.seed()
+
+board = [[0] * SIZE for _ in range(SIZE)]
+score = 0
+best = 0
+moves = 0
+won = False
+game_over = False
+start_time = time.time()
+last_message = "Join matching tiles to reach 2048."
+
+def empty_cells():
+    return [(r, c) for r in range(SIZE) for c in range(SIZE) if board[r][c] == 0]
+
+def add_tile():
+    cells = empty_cells()
+    if not cells:
+        return False
+    r, c = random.choice(cells)
+    board[r][c] = 4 if random.random() < 0.10 else 2
+    return True
+
+def reset():
+    global board, score, moves, won, game_over, start_time, last_message
+    board = [[0] * SIZE for _ in range(SIZE)]
+    score = 0
+    moves = 0
+    won = False
+    game_over = False
+    start_time = time.time()
+    last_message = "New game. Use arrow keys, WASD, or the buttons."
+    add_tile()
+    add_tile()
+
+def compress_and_merge(line):
+    global score, best
+    values = [value for value in line if value]
+    merged = []
+    gained = 0
+    i = 0
+    while i < len(values):
+        if i + 1 < len(values) and values[i] == values[i + 1]:
+            new_value = values[i] * 2
+            merged.append(new_value)
+            gained += new_value
+            i += 2
+        else:
+            merged.append(values[i])
+            i += 1
+    merged += [0] * (SIZE - len(merged))
+    score += gained
+    best = max(best, score)
+    return merged
+
+def can_move():
+    if empty_cells():
+        return True
+    for r in range(SIZE):
+        for c in range(SIZE):
+            if r + 1 < SIZE and board[r][c] == board[r + 1][c]:
+                return True
+            if c + 1 < SIZE and board[r][c] == board[r][c + 1]:
+                return True
+    return False
+
+def move(direction):
+    global board, moves, won, game_over, last_message
+    if game_over:
+        return
+
+    before = [row[:] for row in board]
+
+    if direction == "left":
+        board = [compress_and_merge(row) for row in board]
+    elif direction == "right":
+        board = [list(reversed(compress_and_merge(list(reversed(row))))) for row in board]
+    elif direction == "up":
+        columns = [[board[r][c] for r in range(SIZE)] for c in range(SIZE)]
+        merged = [compress_and_merge(col) for col in columns]
+        board = [[merged[c][r] for c in range(SIZE)] for r in range(SIZE)]
+    elif direction == "down":
+        columns = [[board[r][c] for r in range(SIZE)] for c in range(SIZE)]
+        merged = [list(reversed(compress_and_merge(list(reversed(col))))) for col in columns]
+        board = [[merged[c][r] for c in range(SIZE)] for r in range(SIZE)]
+    else:
+        return
+
+    if board != before:
+        moves += 1
+        add_tile()
+        if any(2048 in row for row in board):
+            won = True
+            last_message = "2048 reached. Keep going or restart."
+        elif not can_move():
+            game_over = True
+            last_message = "No moves left. Press R or New Game."
+        else:
+            last_message = f"Moved {direction}."
+
+def process_keyboard():
+    try:
+        keys = json.loads(window.__pop2048Keys())
+    except Exception:
+        keys = []
+    for key in keys:
+        if key == "restart":
+            reset()
+        else:
+            move(key)
+
+def tile_label(value, r, c):
+    return (str(value) if value else " ") + f"##tile_{r}_{c}"
+
+def tile_color(value):
+    # Dear ImGui expects normalized RGBA floats.
+    palette = {
+        0:    (0.20, 0.22, 0.27, 1.0),
+        2:    (0.40, 0.48, 0.60, 1.0),
+        4:    (0.32, 0.53, 0.70, 1.0),
+        8:    (0.24, 0.62, 0.72, 1.0),
+        16:   (0.20, 0.68, 0.58, 1.0),
+        32:   (0.44, 0.70, 0.34, 1.0),
+        64:   (0.70, 0.66, 0.25, 1.0),
+        128:  (0.78, 0.53, 0.24, 1.0),
+        256:  (0.78, 0.38, 0.28, 1.0),
+        512:  (0.72, 0.28, 0.42, 1.0),
+        1024: (0.60, 0.30, 0.62, 1.0),
+        2048: (0.45, 0.35, 0.85, 1.0),
+    }
+    return palette.get(value, (0.30, 0.24, 0.55, 1.0))
+
+def draw_board():
+    for r in range(SIZE):
+        for c in range(SIZE):
+            value = board[r][c]
+            imgui.push_style_color(imgui.Col_.button, tile_color(value))
+            imgui.push_style_color(imgui.Col_.button_hovered, tile_color(value))
+            imgui.push_style_color(imgui.Col_.button_active, tile_color(value))
+            imgui.button(tile_label(value, r, c), (CELL, CELL))
+            imgui.pop_style_color(3)
+            if c + 1 < SIZE:
+                imgui.same_line(0, GAP)
+
+def controls():
+    if imgui.button("↑##up", (46, 34)):
+        move("up")
+    if imgui.button("←##left", (46, 34)):
+        move("left")
+    imgui.same_line()
+    if imgui.button("↓##down", (46, 34)):
+        move("down")
+    imgui.same_line()
+    if imgui.button("→##right", (46, 34)):
+        move("right")
+
+def gui():
+    process_keyboard()
+
+    imgui.set_next_window_size((545, 650), imgui.Cond_.once)
+    imgui.begin("2048 in Python / Dear ImGui / WebAssembly")
+
+    imgui.text("2048")
+    imgui.same_line()
+    imgui.text(f"Score: {score}")
+    imgui.same_line()
+    imgui.text(f"Best: {best}")
+    imgui.same_line()
+    imgui.text(f"Moves: {moves}")
+
+    if imgui.button("New Game"):
+        reset()
+    imgui.same_line()
+    imgui.text("Keyboard: arrows/WASD, R to restart")
+
+    imgui.separator()
+    draw_board()
+    imgui.separator()
+
+    if won and not game_over:
+        imgui.text("You reached 2048. You can keep playing.")
+    elif game_over:
+        imgui.text("Game over.")
+    else:
+        imgui.text(last_message)
+
+    imgui.text(f"FPS: {hello_imgui.frame_rate():.1f} | Uptime: {time.time() - start_time:.1f}s")
+    controls()
+
+    imgui.end()
+
+reset()
+immapp.run(
+    gui,
+    window_title="2048 with imgui-bundle + Pyodide",
+    window_size=(720, 760),
+    fps_idle=0,
+)
+`;
+
+    async function main() {
+      try {
+        log("Loading Pyodide 314.0.0…");
+        const pyodide = await loadPyodide({
+          indexURL: "https://cdn.jsdelivr.net/pyodide/v314.0.0/full/"
+        });
+
+        // Route SDL/Emscripten rendering to this page's canvas before importing imgui_bundle.
+        pyodide.canvas.setCanvas2D(canvas);
+        pyodide._api._skip_unwind_fatal_error = true;
+
+        log("Installing micropip…");
+        await pyodide.loadPackage("micropip");
+
+        log("Installing imgui-bundle from PyPI…");
+        const micropip = pyodide.pyimport("micropip");
+        await micropip.install("imgui-bundle");
+
+        overlayEl.style.display = "none";
+        log("Running 2048…");
+        canvas.focus();
+        pyodide.runPython(pythonCode);
+      } catch (error) {
+        console.error(error);
+        overlayEl.innerHTML = `<strong>Startup failed.</strong><br><small>${String(error).replaceAll("<", "&lt;")}</small>`;
+        log(`Error: ${error && error.message ? error.message : error}`);
+      }
+    }
+
+    main();
+  </script>
+</body>
+</html>
