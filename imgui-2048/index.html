@@ -101,8 +101,14 @@
     const canvas = document.getElementById("canvas");
 
     function log(message) {
+      statusEl.hidden = false;
       statusEl.textContent = message;
       console.log(message);
+    }
+
+    function clearStatus() {
+      statusEl.textContent = "";
+      statusEl.hidden = true;
     }
 
     function resizeCanvasToDisplaySize() {
@@ -216,6 +222,14 @@ SIZE = 4
 DESKTOP_CELL = 92
 DESKTOP_WINDOW_WIDTH = 545
 DESKTOP_WINDOW_HEIGHT = 650
+CONTROL_BUTTON_SIZE = (46, 34)
+WINDOW_FLAGS = (
+    imgui.WindowFlags_.no_title_bar
+    | imgui.WindowFlags_.no_resize
+    | imgui.WindowFlags_.no_move
+    | imgui.WindowFlags_.no_collapse
+    | imgui.WindowFlags_.no_saved_settings
+)
 random.seed()
 
 board = [[0] * SIZE for _ in range(SIZE)]
@@ -313,7 +327,7 @@ def move(direction):
             game_over = True
             last_message = "No moves left. Press R or New Game."
         else:
-            last_message = f"Moved {direction}."
+            last_message = ""
 
 def process_keyboard():
     try:
@@ -423,15 +437,22 @@ def draw_board():
                 imgui.same_line(0, gap)
 
 def controls():
-    if imgui.button("^##up", (46, 34)):
+    button_width, _ = CONTROL_BUTTON_SIZE
+    spacing_x, _ = vec_xy(imgui.get_style().item_spacing)
+    offset = button_width + spacing_x
+
+    imgui.indent(offset)
+    if imgui.button("^##up", CONTROL_BUTTON_SIZE):
         move("up")
-    if imgui.button("<##left", (46, 34)):
+    imgui.unindent(offset)
+
+    if imgui.button("<##left", CONTROL_BUTTON_SIZE):
         move("left")
     imgui.same_line()
-    if imgui.button("v##down", (46, 34)):
+    if imgui.button("v##down", CONTROL_BUTTON_SIZE):
         move("down")
     imgui.same_line()
-    if imgui.button(">##right", (46, 34)):
+    if imgui.button(">##right", CONTROL_BUTTON_SIZE):
         move("right")
 
 def gui():
@@ -440,7 +461,7 @@ def gui():
     layout = window_layout()
     imgui.set_next_window_pos((layout["margin"], layout["margin"]), imgui.Cond_.always)
     imgui.set_next_window_size((layout["width"], layout["height"]), imgui.Cond_.always)
-    imgui.begin("2048 in Python / Dear ImGui / WebAssembly")
+    imgui.begin("2048 in Python / Dear ImGui / WebAssembly", None, WINDOW_FLAGS)
 
     if layout["compact"]:
         imgui.text(f"2048  Score: {score}")
@@ -467,11 +488,12 @@ def gui():
     imgui.separator()
 
     if won and not game_over:
-        imgui.text("You reached 2048. You can keep playing.")
+        status_message = "You reached 2048. You can keep playing."
     elif game_over:
-        imgui.text("Game over.")
+        status_message = last_message
     else:
-        imgui.text(last_message)
+        status_message = last_message
+    imgui.text(status_message)
 
     imgui.text(f"FPS: {hello_imgui.frame_rate():.1f} | Uptime: {time.time() - start_time:.1f}s")
     controls()
@@ -506,7 +528,7 @@ immapp.run(
         await micropip.install("imgui-bundle");
 
         overlayEl.style.display = "none";
-        log("Running 2048…");
+        clearStatus();
         canvas.focus();
         pyodide.runPython(pythonCode);
       } catch (error) {
