@@ -139,6 +139,27 @@
       height: canvas.clientHeight,
       compact: window.matchMedia("(max-width: 700px)").matches
     });
+    const bestScoreKey = "imgui-2048.bestScore";
+    window.__get2048BestScore = () => {
+      const value = localStorage.getItem(bestScoreKey);
+      if (value === null) {
+        return 0;
+      }
+      if (!/^\d+$/.test(value)) {
+        throw new Error(`Invalid stored 2048 best score: ${value}`);
+      }
+      const bestScore = Number(value);
+      if (!Number.isSafeInteger(bestScore)) {
+        throw new Error(`Invalid stored 2048 best score: ${value}`);
+      }
+      return bestScore;
+    };
+    window.__set2048BestScore = (value) => {
+      if (!Number.isSafeInteger(value) || value < 0) {
+        throw new Error(`Invalid 2048 best score: ${value}`);
+      }
+      localStorage.setItem(bestScoreKey, String(value));
+    };
 
     const keyMap = new Map([
       ["ArrowUp", "up"], ["w", "up"], ["W", "up"],
@@ -232,9 +253,20 @@ WINDOW_FLAGS = (
 )
 random.seed()
 
+def load_best_score():
+    value = int(window.__get2048BestScore())
+    if value < 0:
+        raise ValueError(f"Invalid stored 2048 best score: {value}")
+    return value
+
+def save_best_score(value):
+    if value < 0:
+        raise ValueError(f"Invalid 2048 best score: {value}")
+    window.__set2048BestScore(int(value))
+
 board = [[0] * SIZE for _ in range(SIZE)]
 score = 0
-best = 0
+best = load_best_score()
 moves = 0
 won = False
 game_over = False
@@ -281,7 +313,9 @@ def compress_and_merge(line):
             i += 1
     merged += [0] * (SIZE - len(merged))
     score += gained
-    best = max(best, score)
+    if score > best:
+        best = score
+        save_best_score(best)
     return merged
 
 def can_move():
