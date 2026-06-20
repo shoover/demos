@@ -243,7 +243,7 @@ SIZE = 4
 DESKTOP_CELL = 92
 DESKTOP_BOARD_GAP = 8
 BOARD_MARGIN = 14
-CONTROL_BUTTON_SIZE = (68, 50)
+CONTROL_BUTTON_SIZE = (74, 54)
 WINDOW_FLAGS = (
     imgui.WindowFlags_.no_title_bar
     | imgui.WindowFlags_.no_resize
@@ -534,22 +534,22 @@ def controls():
     spacing_x, _ = vec_xy(imgui.get_style().item_spacing)
     row_width = button_width * 3 + spacing_x * 2
     group_indent = max(0, (available_width - row_width) / 2)
-    offset = button_width + spacing_x
+    up_indent = (button_width + spacing_x) * 2
 
     imgui.indent(group_indent)
-    imgui.indent(offset)
+    imgui.indent(up_indent)
     if imgui.button("^##up", CONTROL_BUTTON_SIZE):
         move("up")
-    imgui.unindent(offset)
+    imgui.unindent(up_indent)
 
     if imgui.button("<##left", CONTROL_BUTTON_SIZE):
         move("left")
     imgui.same_line()
-    if imgui.button("v##down", CONTROL_BUTTON_SIZE):
-        move("down")
-    imgui.same_line()
     if imgui.button(">##right", CONTROL_BUTTON_SIZE):
         move("right")
+    imgui.same_line()
+    if imgui.button("v##down", CONTROL_BUTTON_SIZE):
+        move("down")
     imgui.unindent(group_indent)
 
 def gui():
