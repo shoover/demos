@@ -241,15 +241,17 @@ from imgui_bundle import imgui, immapp, hello_imgui
 
 SIZE = 4
 DESKTOP_CELL = 92
-DESKTOP_WINDOW_WIDTH = 545
-DESKTOP_WINDOW_HEIGHT = 650
-CONTROL_BUTTON_SIZE = (46, 34)
+DESKTOP_BOARD_GAP = 8
+BOARD_MARGIN = 14
+CONTROL_BUTTON_SIZE = (68, 50)
 WINDOW_FLAGS = (
     imgui.WindowFlags_.no_title_bar
     | imgui.WindowFlags_.no_resize
     | imgui.WindowFlags_.no_move
     | imgui.WindowFlags_.no_collapse
     | imgui.WindowFlags_.no_saved_settings
+    | imgui.WindowFlags_.no_scrollbar
+    | imgui.WindowFlags_.no_scroll_with_mouse
 )
 random.seed()
 
@@ -384,14 +386,66 @@ def viewport():
 def window_layout():
     width, height, compact = viewport()
     margin = 6 if compact else 14
+    style = imgui.get_style()
+    padding_x, padding_y = vec_xy(style.window_padding)
+    _, spacing_y = vec_xy(style.item_spacing)
+    board_gap = 6 if compact else DESKTOP_BOARD_GAP
+    board_margin = 8 if compact else BOARD_MARGIN
+    desired_board_width = DESKTOP_CELL * SIZE + board_gap * (SIZE - 1)
     available_width = max(1, width - margin * 2)
     available_height = max(1, height - margin * 2)
-    window_width = min(DESKTOP_WINDOW_WIDTH, available_width)
-    window_height = min(DESKTOP_WINDOW_HEIGHT, available_height)
+
+    max_board_by_width = max(1, available_width - padding_x * 2 - board_margin * 2)
+    initial_board_width = min(desired_board_width, max_board_by_width)
+    initial_content_width = initial_board_width + board_margin * 2
+
+    line_height = imgui.get_text_line_height_with_spacing()
+    controls_height = CONTROL_BUTTON_SIZE[1] * 2 + spacing_y
+    header_lines = 2 if compact else 1
+    help_lines = 1 if compact or initial_content_width < 500 else 0
+    chrome_height = (
+        padding_y * 2
+        + line_height * header_lines
+        + imgui.get_frame_height_with_spacing()
+        + line_height * help_lines
+        + line_height * 2
+        + controls_height
+        + spacing_y * 4
+        + board_margin * 2
+    )
+
+    board_width = min(
+        desired_board_width,
+        max_board_by_width,
+        max(1, available_height - chrome_height),
+    )
+    window_width = min(
+        board_width + board_margin * 2 + padding_x * 2,
+        available_width,
+    )
+    content_width = max(1, window_width - padding_x * 2)
+    help_lines = 1 if compact or content_width < 500 else 0
+    chrome_height = (
+        padding_y * 2
+        + line_height * header_lines
+        + imgui.get_frame_height_with_spacing()
+        + line_height * help_lines
+        + line_height * 2
+        + controls_height
+        + spacing_y * 4
+        + board_margin * 2
+    )
+    window_height = min(chrome_height + board_width, available_height)
+    x = max(margin, (width - window_width) / 2)
+    y = max(margin, (height - window_height) / 2)
     return {
         "margin": margin,
+        "x": x,
+        "y": y,
         "width": window_width,
         "height": window_height,
+        "board_width": board_width,
+        "content_width": content_width,
         "compact": compact,
     }
 
@@ -447,16 +501,19 @@ def draw_large_tile_number(value, cell):
     y = min_y + (tile_height - height) / 2
     draw_list.add_text(imgui.get_font(), font_size, (x, y), 0xffffffff, text)
 
-def board_metrics():
-    available_width, _ = vec_xy(imgui.get_content_region_avail())
-    compact = available_width < 500
-    gap = 6 if compact else 8
-    cell = int((available_width - gap * (SIZE - 1)) / SIZE)
+def board_metrics(target_board_width, compact):
+    gap = 6 if compact else DESKTOP_BOARD_GAP
+    cell = int((target_board_width - gap * (SIZE - 1)) / SIZE)
     cell = max(36, min(DESKTOP_CELL, cell))
     return cell, gap
 
-def draw_board():
-    cell, gap = board_metrics()
+def draw_board(layout):
+    cell, gap = board_metrics(layout["board_width"], layout["compact"])
+    available_width, _ = vec_xy(imgui.get_content_region_avail())
+    board_width = cell * SIZE + gap * (SIZE - 1)
+    indent = max(0, (available_width - board_width) / 2)
+
+    imgui.indent(indent)
     for r in range(SIZE):
         for c in range(SIZE):
             value = board[r][c]
@@ -469,12 +526,17 @@ def draw_board():
             imgui.pop_style_color(3)
             if c + 1 < SIZE:
                 imgui.same_line(0, gap)
+    imgui.unindent(indent)
 
 def controls():
     button_width, _ = CONTROL_BUTTON_SIZE
+    available_width, _ = vec_xy(imgui.get_content_region_avail())
     spacing_x, _ = vec_xy(imgui.get_style().item_spacing)
+    row_width = button_width * 3 + spacing_x * 2
+    group_indent = max(0, (available_width - row_width) / 2)
     offset = button_width + spacing_x
 
+    imgui.indent(group_indent)
     imgui.indent(offset)
     if imgui.button("^##up", CONTROL_BUTTON_SIZE):
         move("up")
@@ -488,12 +550,13 @@ def controls():
     imgui.same_line()
     if imgui.button(">##right", CONTROL_BUTTON_SIZE):
         move("right")
+    imgui.unindent(group_indent)
 
 def gui():
     process_keyboard()
 
     layout = window_layout()
-    imgui.set_next_window_pos((layout["margin"], layout["margin"]), imgui.Cond_.always)
+    imgui.set_next_window_pos((layout["x"], layout["y"]), imgui.Cond_.always)
     imgui.set_next_window_size((layout["width"], layout["height"]), imgui.Cond_.always)
     imgui.begin("2048 in Python / Dear ImGui / WebAssembly", None, WINDOW_FLAGS)
 
@@ -511,14 +574,16 @@ def gui():
 
     if imgui.button("New Game"):
         reset()
-    if not layout["compact"]:
+    if not layout["compact"] and layout["content_width"] >= 500:
         imgui.same_line()
         imgui.text("Keyboard: arrows/WASD, swipe, R to restart")
+    elif not layout["compact"]:
+        imgui.text_wrapped("Keyboard: arrows/WASD, swipe, R to restart")
     else:
         imgui.text("Swipe to move. R restarts.")
 
     imgui.separator()
-    draw_board()
+    draw_board(layout)
     imgui.separator()
 
     if won and not game_over:
