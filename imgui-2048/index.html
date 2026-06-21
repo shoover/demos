@@ -356,12 +356,15 @@ def move(direction):
     if board != before:
         moves += 1
         add_tile()
-        if any(2048 in row for row in board):
+        reached_2048 = not won and any(2048 in row for row in board)
+        if reached_2048:
             won = True
-            last_message = "2048 reached. Keep going or restart."
-        elif not can_move():
+
+        if not can_move():
             game_over = True
             last_message = "No moves left. Press R or New Game."
+        elif reached_2048:
+            last_message = "2048 reached. Keep going or restart."
         else:
             last_message = ""
 
