@@ -12,7 +12,8 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-OUTPUT = ROOT / "index.html"
+SITE_ROOT = ROOT / "site"
+OUTPUT = SITE_ROOT / "index.html"
 
 
 class TitleParser(HTMLParser):
@@ -63,7 +64,7 @@ def read_title(index_path: Path) -> str | None:
 def discover_demos() -> list[Demo]:
     demos: list[Demo] = []
 
-    for child in ROOT.iterdir():
+    for child in SITE_ROOT.iterdir():
         index_path = child / "index.html"
         if not child.is_dir() or not index_path.is_file():
             continue
