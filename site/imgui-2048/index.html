@@ -160,6 +160,21 @@
       }
       localStorage.setItem(bestScoreKey, String(value));
     };
+    const gameStateKey = "imgui-2048.gameState.v1";
+    window.__has2048GameState = () => localStorage.getItem(gameStateKey) !== null;
+    window.__get2048GameState = () => {
+      const value = localStorage.getItem(gameStateKey);
+      if (value === null) {
+        throw new Error("Missing saved 2048 game state");
+      }
+      return value;
+    };
+    window.__set2048GameState = (value) => {
+      if (typeof value !== "string") {
+        throw new Error("Invalid serialized 2048 game state");
+      }
+      localStorage.setItem(gameStateKey, value);
+    };
 
     const keyMap = new Map([
       ["ArrowUp", "up"], ["w", "up"], ["W", "up"],
@@ -234,12 +249,18 @@
 
     const pythonCode = String.raw`
 import json
+import math
 import random
 import time
+from collections import deque
 from js import window
 from imgui_bundle import imgui, immapp, hello_imgui
 
 SIZE = 4
+STATE_VERSION = 1
+SAVE_INTERVAL_SECONDS = 5
+SAVE_LATENCY_CAPACITY = 256
+SAVE_METRICS_REFRESH_SECONDS = 1
 DESKTOP_CELL = 92
 DESKTOP_BOARD_GAP = 8
 BOARD_MARGIN = 14
@@ -273,10 +294,152 @@ moves = 0
 won = False
 game_over = False
 start_time = time.time()
+last_save_time = 0
+save_latencies_ms = deque(maxlen=SAVE_LATENCY_CAPACITY)
+save_latency_percentiles = None
+last_save_metrics_refresh = 0
 last_message = "Join matching tiles to reach 2048."
 
 def empty_cells():
     return [(r, c) for r in range(SIZE) for c in range(SIZE) if board[r][c] == 0]
+
+def is_valid_tile(value):
+    return (
+        isinstance(value, int)
+        and not isinstance(value, bool)
+        and (value == 0 or (value >= 2 and value & (value - 1) == 0))
+    )
+
+def require_nonnegative_int(value, name):
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"Invalid saved 2048 {name}: {value!r}")
+    return value
+
+def validate_saved_board(value):
+    if (
+        not isinstance(value, list)
+        or len(value) != SIZE
+        or any(not isinstance(row, list) or len(row) != SIZE for row in value)
+        or any(not is_valid_tile(tile) for row in value for tile in row)
+    ):
+        raise ValueError("Invalid saved 2048 board")
+    return [row[:] for row in value]
+
+def board_can_move(value):
+    if any(tile == 0 for row in value for tile in row):
+        return True
+    for r in range(SIZE):
+        for c in range(SIZE):
+            if r + 1 < SIZE and value[r][c] == value[r + 1][c]:
+                return True
+            if c + 1 < SIZE and value[r][c] == value[r][c + 1]:
+                return True
+    return False
+
+def serialize_game_state():
+    return json.dumps({
+        "version": STATE_VERSION,
+        "board": board,
+        "score": score,
+        "moves": moves,
+        "won": won,
+        "game_over": game_over,
+        "elapsed_seconds": max(0, time.time() - start_time),
+    }, separators=(",", ":"))
+
+def save_game_state():
+    global last_save_time
+
+    started_at = time.perf_counter()
+    serialized = serialize_game_state()
+    window.__set2048GameState(serialized)
+    save_latencies_ms.append((time.perf_counter() - started_at) * 1000)
+    last_save_time = time.time()
+
+def refresh_save_latency_metrics():
+    global save_latency_percentiles, last_save_metrics_refresh
+
+    now = time.time()
+    if now - last_save_metrics_refresh < SAVE_METRICS_REFRESH_SECONDS:
+        return
+    last_save_metrics_refresh = now
+
+    samples = sorted(save_latencies_ms)
+    if not samples:
+        save_latency_percentiles = None
+        return
+
+    def percentile(fraction):
+        position = (len(samples) - 1) * fraction
+        lower = math.floor(position)
+        upper = math.ceil(position)
+        if lower == upper:
+            return samples[lower]
+        weight = position - lower
+        return samples[lower] * (1 - weight) + samples[upper] * weight
+
+    save_latency_percentiles = (
+        percentile(0.50),
+        percentile(0.90),
+        percentile(0.99),
+        len(samples),
+    )
+
+def load_game_state():
+    global board, score, moves, won, game_over, start_time
+
+    if not bool(window.__has2048GameState()):
+        return False
+    serialized = window.__get2048GameState()
+
+    try:
+        state = json.loads(str(serialized))
+    except json.JSONDecodeError as error:
+        raise ValueError("Invalid saved 2048 game state JSON") from error
+
+    if not isinstance(state, dict) or state.get("version") != STATE_VERSION:
+        raise ValueError("Unsupported saved 2048 game state version")
+
+    restored_board = validate_saved_board(state.get("board"))
+    restored_score = require_nonnegative_int(state.get("score"), "score")
+    restored_moves = require_nonnegative_int(state.get("moves"), "move count")
+    restored_won = state.get("won")
+    restored_game_over = state.get("game_over")
+    elapsed_seconds = state.get("elapsed_seconds")
+
+    if not isinstance(restored_won, bool):
+        raise ValueError(f"Invalid saved 2048 won state: {restored_won!r}")
+    if not isinstance(restored_game_over, bool):
+        raise ValueError(
+            f"Invalid saved 2048 game-over state: {restored_game_over!r}"
+        )
+    if (
+        isinstance(elapsed_seconds, bool)
+        or not isinstance(elapsed_seconds, (int, float))
+        or not math.isfinite(elapsed_seconds)
+        or elapsed_seconds < 0
+    ):
+        raise ValueError(
+            f"Invalid saved 2048 elapsed time: {elapsed_seconds!r}"
+        )
+    if restored_score > best:
+        raise ValueError(
+            f"Saved 2048 score {restored_score} exceeds best score {best}"
+        )
+    if restored_won and not any(
+        tile >= 2048 for row in restored_board for tile in row
+    ):
+        raise ValueError("Saved 2048 won state has no winning tile")
+    if restored_game_over == board_can_move(restored_board):
+        raise ValueError("Saved 2048 game-over state does not match the board")
+
+    board = restored_board
+    score = restored_score
+    moves = restored_moves
+    won = restored_won
+    game_over = restored_game_over
+    start_time = time.time() - elapsed_seconds
+    return True
 
 def add_tile():
     cells = empty_cells()
@@ -297,6 +460,7 @@ def reset():
     last_message = "New game. Use arrow keys, WASD, or the buttons."
     add_tile()
     add_tile()
+    save_game_state()
 
 def compress_and_merge(line):
     global score, best
@@ -367,6 +531,7 @@ def move(direction):
             last_message = "2048 reached. Keep going or restart."
         else:
             last_message = ""
+        save_game_state()
 
 def process_keyboard():
     try:
@@ -557,6 +722,9 @@ def controls():
 
 def gui():
     process_keyboard()
+    if time.time() - last_save_time >= SAVE_INTERVAL_SECONDS:
+        save_game_state()
+    refresh_save_latency_metrics()
 
     layout = window_layout()
     imgui.set_next_window_pos((layout["x"], layout["y"]), imgui.Cond_.always)
@@ -597,12 +765,25 @@ def gui():
         status_message = last_message
     imgui.text(status_message)
 
-    imgui.text(f"FPS: {hello_imgui.frame_rate():.1f} | Uptime: {time.time() - start_time:.1f}s")
+    if save_latency_percentiles is None:
+        save_metrics = "collecting"
+    else:
+        p50, p90, p99, sample_count = save_latency_percentiles
+        save_metrics = f"{p50:.0f}/{p90:.0f}/{p99:.0f} ms"
+    imgui.text(
+        f"FPS: {hello_imgui.frame_rate():.1f}"
+        f" | Uptime: {time.time() - start_time:.1f}s"
+        f" | Save p50/90/99: {save_metrics}"
+    )
     controls()
 
     imgui.end()
 
-reset()
+if load_game_state():
+    last_message = "Saved game restored."
+    last_save_time = time.time()
+else:
+    reset()
 immapp.run(
     gui,
     window_title="2048 with imgui-bundle + Pyodide",
