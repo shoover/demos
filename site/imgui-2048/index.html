@@ -176,6 +176,53 @@
       localStorage.setItem(gameStateKey, value);
     };
 
+    let playTimeSeconds = 0;
+    let playTimeStartedAt = null;
+    let playTimeEnabled = false;
+
+    function settlePlayTime() {
+      if (playTimeStartedAt === null) {
+        return;
+      }
+      playTimeSeconds += (performance.now() - playTimeStartedAt) / 1000;
+      playTimeStartedAt = null;
+    }
+
+    function syncPlayTime() {
+      settlePlayTime();
+      if (playTimeEnabled && document.visibilityState === "visible") {
+        playTimeStartedAt = performance.now();
+      }
+    }
+
+    document.addEventListener("visibilitychange", syncPlayTime);
+
+    window.__set2048PlayTime = (seconds, enabled) => {
+      if (!Number.isFinite(seconds) || seconds < 0) {
+        throw new Error(`Invalid 2048 play time: ${seconds}`);
+      }
+      settlePlayTime();
+      playTimeSeconds = seconds;
+      playTimeEnabled = Boolean(enabled);
+      syncPlayTime();
+    };
+    window.__start2048PlayTime = () => {
+      if (!playTimeEnabled) {
+        playTimeEnabled = true;
+        syncPlayTime();
+      }
+    };
+    window.__pause2048PlayTime = () => {
+      settlePlayTime();
+      playTimeEnabled = false;
+    };
+    window.__get2048PlayTime = () => {
+      if (playTimeStartedAt === null) {
+        return playTimeSeconds;
+      }
+      return playTimeSeconds + (performance.now() - playTimeStartedAt) / 1000;
+    };
+
     const keyMap = new Map([
       ["ArrowUp", "up"], ["w", "up"], ["W", "up"],
       ["ArrowDown", "down"], ["s", "down"], ["S", "down"],
@@ -257,7 +304,8 @@ from js import window
 from imgui_bundle import imgui, immapp, hello_imgui
 
 SIZE = 4
-STATE_VERSION = 1
+STATE_VERSION = 2
+LEGACY_STATE_VERSION = 1
 SAVE_INTERVAL_SECONDS = 5
 SAVE_LATENCY_CAPACITY = 256
 SAVE_METRICS_REFRESH_SECONDS = 1
@@ -293,7 +341,6 @@ best = load_best_score()
 moves = 0
 won = False
 game_over = False
-start_time = time.time()
 last_save_time = 0
 save_latencies_ms = deque(maxlen=SAVE_LATENCY_CAPACITY)
 save_latency_percentiles = None
@@ -344,7 +391,7 @@ def serialize_game_state():
         "moves": moves,
         "won": won,
         "game_over": game_over,
-        "elapsed_seconds": max(0, time.time() - start_time),
+        "play_seconds": float(window.__get2048PlayTime()),
     }, separators=(",", ":"))
 
 def save_game_state():
@@ -386,7 +433,7 @@ def refresh_save_latency_metrics():
     )
 
 def load_game_state():
-    global board, score, moves, won, game_over, start_time
+    global board, score, moves, won, game_over
 
     if not bool(window.__has2048GameState()):
         return False
@@ -397,7 +444,10 @@ def load_game_state():
     except json.JSONDecodeError as error:
         raise ValueError("Invalid saved 2048 game state JSON") from error
 
-    if not isinstance(state, dict) or state.get("version") != STATE_VERSION:
+    if not isinstance(state, dict):
+        raise ValueError("Invalid saved 2048 game state")
+    version = state.get("version")
+    if version not in (LEGACY_STATE_VERSION, STATE_VERSION):
         raise ValueError("Unsupported saved 2048 game state version")
 
     restored_board = validate_saved_board(state.get("board"))
@@ -405,7 +455,9 @@ def load_game_state():
     restored_moves = require_nonnegative_int(state.get("moves"), "move count")
     restored_won = state.get("won")
     restored_game_over = state.get("game_over")
-    elapsed_seconds = state.get("elapsed_seconds")
+    play_seconds = (
+        0 if version == LEGACY_STATE_VERSION else state.get("play_seconds")
+    )
 
     if not isinstance(restored_won, bool):
         raise ValueError(f"Invalid saved 2048 won state: {restored_won!r}")
@@ -414,13 +466,13 @@ def load_game_state():
             f"Invalid saved 2048 game-over state: {restored_game_over!r}"
         )
     if (
-        isinstance(elapsed_seconds, bool)
-        or not isinstance(elapsed_seconds, (int, float))
-        or not math.isfinite(elapsed_seconds)
-        or elapsed_seconds < 0
+        isinstance(play_seconds, bool)
+        or not isinstance(play_seconds, (int, float))
+        or not math.isfinite(play_seconds)
+        or play_seconds < 0
     ):
         raise ValueError(
-            f"Invalid saved 2048 elapsed time: {elapsed_seconds!r}"
+            f"Invalid saved 2048 play time: {play_seconds!r}"
         )
     if restored_score > best:
         raise ValueError(
@@ -438,7 +490,10 @@ def load_game_state():
     moves = restored_moves
     won = restored_won
     game_over = restored_game_over
-    start_time = time.time() - elapsed_seconds
+    window.__set2048PlayTime(
+        float(play_seconds),
+        restored_moves > 0 and not restored_game_over,
+    )
     return True
 
 def add_tile():
@@ -450,13 +505,13 @@ def add_tile():
     return True
 
 def reset():
-    global board, score, moves, won, game_over, start_time, last_message
+    global board, score, moves, won, game_over, last_message
     board = [[0] * SIZE for _ in range(SIZE)]
     score = 0
     moves = 0
     won = False
     game_over = False
-    start_time = time.time()
+    window.__set2048PlayTime(0, False)
     last_message = "New game. Use arrow keys, WASD, or the buttons."
     add_tile()
     add_tile()
@@ -518,6 +573,7 @@ def move(direction):
         return
 
     if board != before:
+        window.__start2048PlayTime()
         moves += 1
         add_tile()
         reached_2048 = not won and any(2048 in row for row in board)
@@ -526,6 +582,7 @@ def move(direction):
 
         if not can_move():
             game_over = True
+            window.__pause2048PlayTime()
             last_message = "No moves left. Press R or New Game."
         elif reached_2048:
             last_message = "2048 reached. Keep going or restart."
@@ -772,7 +829,7 @@ def gui():
         save_metrics = f"{p50:.0f}/{p90:.0f}/{p99:.0f} ms"
     imgui.text(
         f"FPS: {hello_imgui.frame_rate():.1f}"
-        f" | Uptime: {time.time() - start_time:.1f}s"
+        f" | Play time: {float(window.__get2048PlayTime()):.1f}s"
         f" | Save p50/90/99: {save_metrics}"
     )
     controls()
