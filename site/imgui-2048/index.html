@@ -584,8 +584,6 @@ def move(direction):
             game_over = True
             window.__pause2048PlayTime()
             last_message = "No moves left. Press R or New Game."
-        elif reached_2048:
-            last_message = "2048 reached. Keep going or restart."
         else:
             last_message = ""
         save_game_state()
@@ -814,13 +812,7 @@ def gui():
     draw_board(layout)
     imgui.separator()
 
-    if won and not game_over:
-        status_message = "You reached 2048. You can keep playing."
-    elif game_over:
-        status_message = last_message
-    else:
-        status_message = last_message
-    imgui.text(status_message)
+    imgui.text(last_message)
 
     if save_latency_percentiles is None:
         save_metrics = "collecting"
