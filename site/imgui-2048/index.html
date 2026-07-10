@@ -126,7 +126,14 @@
     resizeCanvasToDisplaySize();
 
     window.__game2048Keys = [];
+    const INPUT_THROTTLE_MS = 120;
+    let lastAccepted2048InputTime = 0;
     window.__queue2048Input = (input) => {
+      const now = performance.now();
+      if (now - lastAccepted2048InputTime < INPUT_THROTTLE_MS) {
+        return;
+      }
+      lastAccepted2048InputTime = now;
       window.__game2048Keys.push(input);
     };
     window.__pop2048Keys = () => {
@@ -235,6 +242,9 @@
       const mapped = keyMap.get(event.key);
       if (mapped) {
         event.preventDefault();
+        if (event.repeat) {
+          return;
+        }
         window.__queue2048Input(mapped);
       }
     }, { passive: false });
