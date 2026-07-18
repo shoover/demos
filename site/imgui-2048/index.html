@@ -323,8 +323,9 @@ DESKTOP_CELL = 92
 DESKTOP_BOARD_GAP = 8
 BOARD_MARGIN = 14
 CONTROL_BUTTON_SIZE = (74, 54)
-NEW_TILE_ANIM_SECONDS = 0.15
-MERGE_TILE_ANIM_SECONDS = 0.15
+NEW_TILE_ANIM_SECONDS = 0.12
+MERGE_TILE_ANIM_SECONDS = 0.12
+SLIDE_SECONDS = 0.08
 WINDOW_FLAGS = (
     imgui.WindowFlags_.no_title_bar
     | imgui.WindowFlags_.no_resize
@@ -359,9 +360,21 @@ save_latency_percentiles = None
 last_save_metrics_refresh = 0
 last_message = "Join matching tiles to reach 2048."
 tile_animations = {}  # (r, c) -> ("new" | "merge", start_time)
+# (value, (from_r, from_c), (to_r, to_c)) for every tile in flight after a move. Holds
+# pre-move values: a merge sends both source tiles to one cell, and the doubled value
+# only appears once they land.
+sliding_tiles = []
+slide_start = 0
 
 def ease_out_cubic(t):
     return 1 - (1 - t) ** 3
+
+def ease_in_out_cubic(t):
+    # Slides accelerate out of the old cell and settle into the new one, matching the
+    # ease-in-out the original game transitions tile transforms with.
+    if t < 0.5:
+        return 4 * t * t * t
+    return 1 - (-2 * t + 2) ** 3 / 2
 
 def tile_scale(r, c, now):
     anim = tile_animations.get((r, c))
@@ -373,7 +386,9 @@ def tile_scale(r, c, now):
     if elapsed >= duration:
         del tile_animations[(r, c)]
         return 1.0
-    t = elapsed / duration
+    # Negative while a tile waits for the slide to finish; hold it at the first frame
+    # rather than running the curve backwards.
+    t = max(0.0, elapsed / duration)
     if kind == "new":
         # Grow in from 60% size rather than popping from nothing.
         return 0.6 + ease_out_cubic(t) * 0.4
@@ -547,6 +562,7 @@ def reset():
     won = False
     game_over = False
     tile_animations.clear()
+    sliding_tiles.clear()
     window.__set2048PlayTime(0, False)
     last_message = "New game. Use arrow keys, WASD, or the buttons."
     now = time.perf_counter()
@@ -557,28 +573,37 @@ def reset():
     save_game_state()
 
 def compress_and_merge(line):
+    """Collapse one line toward index 0.
+
+    Returns (merged, merge_positions, sources). sources[j] lists the indices in the
+    input line whose tiles ended up at output index j -- one entry normally, two for a
+    merge -- which is what lets each tile be animated from its old cell to its new one.
+    """
     global score, best
-    values = [value for value in line if value]
+    values = [(index, value) for index, value in enumerate(line) if value]
     merged = []
     merge_positions = set()
+    sources = []
     gained = 0
     i = 0
     while i < len(values):
-        if i + 1 < len(values) and values[i] == values[i + 1]:
-            new_value = values[i] * 2
+        if i + 1 < len(values) and values[i][1] == values[i + 1][1]:
+            new_value = values[i][1] * 2
             merged.append(new_value)
             merge_positions.add(len(merged) - 1)
+            sources.append([values[i][0], values[i + 1][0]])
             gained += new_value
             i += 2
         else:
-            merged.append(values[i])
+            merged.append(values[i][1])
+            sources.append([values[i][0]])
             i += 1
     merged += [0] * (SIZE - len(merged))
     score += gained
     if score > best:
         best = score
         save_best_score(best)
-    return merged, merge_positions
+    return merged, merge_positions, sources
 
 def can_move():
     if empty_cells():
@@ -591,51 +616,63 @@ def can_move():
                 return True
     return False
 
+def line_coordinates(direction):
+    """Board cells per line, ordered so index 0 is the edge tiles collapse toward.
+
+    Sliding needs each tile's origin and destination as board cells, so every direction
+    is expressed as an ordered coordinate list and collapsed by one shared loop.
+    """
+    if direction == "left":
+        return [[(r, c) for c in range(SIZE)] for r in range(SIZE)]
+    if direction == "right":
+        return [[(r, c) for c in reversed(range(SIZE))] for r in range(SIZE)]
+    if direction == "up":
+        return [[(r, c) for r in range(SIZE)] for c in range(SIZE)]
+    if direction == "down":
+        return [[(r, c) for r in reversed(range(SIZE))] for c in range(SIZE)]
+    return None
+
 def move(direction):
-    global board, moves, won, game_over, last_message
+    global moves, won, game_over, last_message, slide_start
     if game_over:
+        return
+
+    lines = line_coordinates(direction)
+    if lines is None:
         return
 
     before = [row[:] for row in board]
     merge_cells = set()
+    in_flight = []
 
-    if direction == "left":
-        results = [compress_and_merge(row) for row in board]
-        board = [merged for merged, _ in results]
-        merge_cells = {(r, c) for r, (_, positions) in enumerate(results) for c in positions}
-    elif direction == "right":
-        results = [compress_and_merge(list(reversed(row))) for row in board]
-        board = [list(reversed(merged)) for merged, _ in results]
-        merge_cells = {
-            (r, SIZE - 1 - c) for r, (_, positions) in enumerate(results) for c in positions
-        }
-    elif direction == "up":
-        columns = [[board[r][c] for r in range(SIZE)] for c in range(SIZE)]
-        results = [compress_and_merge(col) for col in columns]
-        merged = [values for values, _ in results]
-        board = [[merged[c][r] for c in range(SIZE)] for r in range(SIZE)]
-        merge_cells = {(r, c) for c, (_, positions) in enumerate(results) for r in positions}
-    elif direction == "down":
-        columns = [[board[r][c] for r in range(SIZE)] for c in range(SIZE)]
-        results = [compress_and_merge(list(reversed(col))) for col in columns]
-        merged = [list(reversed(values)) for values, _ in results]
-        board = [[merged[c][r] for c in range(SIZE)] for r in range(SIZE)]
-        merge_cells = {
-            (SIZE - 1 - r, c) for c, (_, positions) in enumerate(results) for r in positions
-        }
-    else:
-        return
+    for coordinates in lines:
+        line = [board[r][c] for r, c in coordinates]
+        merged, merge_positions, sources = compress_and_merge(line)
+        for index, (r, c) in enumerate(coordinates):
+            board[r][c] = merged[index]
+        merge_cells.update(coordinates[index] for index in merge_positions)
+        for index, source_indices in enumerate(sources):
+            destination = coordinates[index]
+            for source_index in source_indices:
+                in_flight.append(
+                    (line[source_index], coordinates[source_index], destination)
+                )
 
     if board != before:
         now = time.perf_counter()
         tile_animations.clear()
+        sliding_tiles[:] = in_flight
+        slide_start = now
+        # Tiles travel first; pop and appear only start once they have landed, so a
+        # merge reads as two tiles arriving and becoming one.
+        landed = now + SLIDE_SECONDS
         for cell in merge_cells:
-            tile_animations[cell] = ("merge", now)
+            tile_animations[cell] = ("merge", landed)
         window.__start2048PlayTime()
         moves += 1
         new_cell = add_tile()
         if new_cell is not None:
-            tile_animations[new_cell] = ("new", now)
+            tile_animations[new_cell] = ("new", landed)
         reached_2048 = not won and any(2048 in row for row in board)
         if reached_2048:
             won = True
@@ -790,6 +827,17 @@ def board_metrics(target_board_width, compact):
     cell = max(36, min(DESKTOP_CELL, cell))
     return cell, gap
 
+def draw_tile(label, x, y, size, value):
+    """Draw one tile square at an absolute screen position. value 0 draws a grid cell."""
+    imgui.set_cursor_screen_pos((x, y))
+    color = tile_color(value)
+    imgui.push_style_color(imgui.Col_.button, color)
+    imgui.push_style_color(imgui.Col_.button_hovered, color)
+    imgui.push_style_color(imgui.Col_.button_active, color)
+    imgui.button(label, (size, size))
+    draw_large_tile_number(value, size)
+    imgui.pop_style_color(3)
+
 def draw_board(layout):
     cell, gap = board_metrics(layout["board_width"], layout["compact"])
     available_width, _ = vec_xy(imgui.get_content_region_avail())
@@ -803,33 +851,50 @@ def draw_board(layout):
     # Background grid stays static and full-size; animated tiles draw on top of it.
     for r in range(SIZE):
         for c in range(SIZE):
-            x = origin_x + c * (cell + gap)
-            y = origin_y + r * (cell + gap)
-            imgui.set_cursor_screen_pos((x, y))
-            imgui.push_style_color(imgui.Col_.button, tile_color(0))
-            imgui.push_style_color(imgui.Col_.button_hovered, tile_color(0))
-            imgui.push_style_color(imgui.Col_.button_active, tile_color(0))
-            imgui.button("##cell_{r}_{c}".format(r=r, c=c), (cell, cell))
-            imgui.pop_style_color(3)
+            draw_tile(
+                "##cell_{r}_{c}".format(r=r, c=c),
+                origin_x + c * (cell + gap),
+                origin_y + r * (cell + gap),
+                cell,
+                0,
+            )
 
-    for r in range(SIZE):
-        for c in range(SIZE):
-            value = board[r][c]
-            if not value:
-                continue
-            tile_size = cell * tile_scale(r, c, now)
-            if tile_size < 1:
-                continue
-            offset = (cell - tile_size) / 2
-            x = origin_x + c * (cell + gap) + offset
-            y = origin_y + r * (cell + gap) + offset
-            imgui.set_cursor_screen_pos((x, y))
-            imgui.push_style_color(imgui.Col_.button, tile_color(value))
-            imgui.push_style_color(imgui.Col_.button_hovered, tile_color(value))
-            imgui.push_style_color(imgui.Col_.button_active, tile_color(value))
-            imgui.button("##tile_{r}_{c}".format(r=r, c=c), (tile_size, tile_size))
-            draw_large_tile_number(value, tile_size)
-            imgui.pop_style_color(3)
+    slide_elapsed = now - slide_start
+    if sliding_tiles and slide_elapsed < SLIDE_SECONDS:
+        # Mid-flight: draw the tiles travelling from their old cells rather than the
+        # settled board, so a merge shows both tiles converging on the same square.
+        # The tile spawned by this move is held back until they land.
+        progress = ease_in_out_cubic(slide_elapsed / SLIDE_SECONDS)
+        for index, (value, source, destination) in enumerate(sliding_tiles):
+            from_r, from_c = source
+            to_r, to_c = destination
+            r = from_r + (to_r - from_r) * progress
+            c = from_c + (to_c - from_c) * progress
+            draw_tile(
+                "##slide_{index}".format(index=index),
+                origin_x + c * (cell + gap),
+                origin_y + r * (cell + gap),
+                cell,
+                value,
+            )
+    else:
+        sliding_tiles.clear()
+        for r in range(SIZE):
+            for c in range(SIZE):
+                value = board[r][c]
+                if not value:
+                    continue
+                tile_size = cell * tile_scale(r, c, now)
+                if tile_size < 1:
+                    continue
+                offset = (cell - tile_size) / 2
+                draw_tile(
+                    "##tile_{r}_{c}".format(r=r, c=c),
+                    origin_x + c * (cell + gap) + offset,
+                    origin_y + r * (cell + gap) + offset,
+                    tile_size,
+                    value,
+                )
 
     imgui.set_cursor_screen_pos((origin_x, origin_y))
     imgui.dummy((board_width, board_width))
