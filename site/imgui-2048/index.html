@@ -323,6 +323,8 @@ DESKTOP_CELL = 92
 DESKTOP_BOARD_GAP = 8
 BOARD_MARGIN = 14
 CONTROL_BUTTON_SIZE = (74, 54)
+NEW_TILE_ANIM_SECONDS = 0.15
+MERGE_TILE_ANIM_SECONDS = 0.15
 WINDOW_FLAGS = (
     imgui.WindowFlags_.no_title_bar
     | imgui.WindowFlags_.no_resize
@@ -356,6 +358,29 @@ save_latencies_ms = deque(maxlen=SAVE_LATENCY_CAPACITY)
 save_latency_percentiles = None
 last_save_metrics_refresh = 0
 last_message = "Join matching tiles to reach 2048."
+tile_animations = {}  # (r, c) -> ("new" | "merge", start_time)
+
+def ease_out_cubic(t):
+    return 1 - (1 - t) ** 3
+
+def tile_scale(r, c, now):
+    anim = tile_animations.get((r, c))
+    if anim is None:
+        return 1.0
+    kind, start = anim
+    duration = NEW_TILE_ANIM_SECONDS if kind == "new" else MERGE_TILE_ANIM_SECONDS
+    elapsed = now - start
+    if elapsed >= duration:
+        del tile_animations[(r, c)]
+        return 1.0
+    t = elapsed / duration
+    if kind == "new":
+        # Grow in from 60% size rather than popping from nothing.
+        return 0.6 + ease_out_cubic(t) * 0.4
+    # Merge: nudge past full size (1 -> 1.08) then settle back (1.08 -> 1).
+    if t < 0.5:
+        return 1 + ease_out_cubic(t / 0.5) * 0.08
+    return 1.08 - ease_out_cubic((t - 0.5) / 0.5) * 0.08
 
 def empty_cells():
     return [(r, c) for r in range(SIZE) for c in range(SIZE) if board[r][c] == 0]
@@ -509,10 +534,10 @@ def load_game_state():
 def add_tile():
     cells = empty_cells()
     if not cells:
-        return False
+        return None
     r, c = random.choice(cells)
     board[r][c] = 4 if random.random() < 0.10 else 2
-    return True
+    return (r, c)
 
 def reset():
     global board, score, moves, won, game_over, last_message
@@ -521,22 +546,28 @@ def reset():
     moves = 0
     won = False
     game_over = False
+    tile_animations.clear()
     window.__set2048PlayTime(0, False)
     last_message = "New game. Use arrow keys, WASD, or the buttons."
-    add_tile()
-    add_tile()
+    now = time.perf_counter()
+    for _ in range(2):
+        cell = add_tile()
+        if cell is not None:
+            tile_animations[cell] = ("new", now)
     save_game_state()
 
 def compress_and_merge(line):
     global score, best
     values = [value for value in line if value]
     merged = []
+    merge_positions = set()
     gained = 0
     i = 0
     while i < len(values):
         if i + 1 < len(values) and values[i] == values[i + 1]:
             new_value = values[i] * 2
             merged.append(new_value)
+            merge_positions.add(len(merged) - 1)
             gained += new_value
             i += 2
         else:
@@ -547,7 +578,7 @@ def compress_and_merge(line):
     if score > best:
         best = score
         save_best_score(best)
-    return merged
+    return merged, merge_positions
 
 def can_move():
     if empty_cells():
@@ -566,26 +597,45 @@ def move(direction):
         return
 
     before = [row[:] for row in board]
+    merge_cells = set()
 
     if direction == "left":
-        board = [compress_and_merge(row) for row in board]
+        results = [compress_and_merge(row) for row in board]
+        board = [merged for merged, _ in results]
+        merge_cells = {(r, c) for r, (_, positions) in enumerate(results) for c in positions}
     elif direction == "right":
-        board = [list(reversed(compress_and_merge(list(reversed(row))))) for row in board]
+        results = [compress_and_merge(list(reversed(row))) for row in board]
+        board = [list(reversed(merged)) for merged, _ in results]
+        merge_cells = {
+            (r, SIZE - 1 - c) for r, (_, positions) in enumerate(results) for c in positions
+        }
     elif direction == "up":
         columns = [[board[r][c] for r in range(SIZE)] for c in range(SIZE)]
-        merged = [compress_and_merge(col) for col in columns]
+        results = [compress_and_merge(col) for col in columns]
+        merged = [values for values, _ in results]
         board = [[merged[c][r] for c in range(SIZE)] for r in range(SIZE)]
+        merge_cells = {(r, c) for c, (_, positions) in enumerate(results) for r in positions}
     elif direction == "down":
         columns = [[board[r][c] for r in range(SIZE)] for c in range(SIZE)]
-        merged = [list(reversed(compress_and_merge(list(reversed(col))))) for col in columns]
+        results = [compress_and_merge(list(reversed(col))) for col in columns]
+        merged = [list(reversed(values)) for values, _ in results]
         board = [[merged[c][r] for c in range(SIZE)] for r in range(SIZE)]
+        merge_cells = {
+            (SIZE - 1 - r, c) for c, (_, positions) in enumerate(results) for r in positions
+        }
     else:
         return
 
     if board != before:
+        now = time.perf_counter()
+        tile_animations.clear()
+        for cell in merge_cells:
+            tile_animations[cell] = ("merge", now)
         window.__start2048PlayTime()
         moves += 1
-        add_tile()
+        new_cell = add_tile()
+        if new_cell is not None:
+            tile_animations[new_cell] = ("new", now)
         reached_2048 = not won and any(2048 in row for row in board)
         if reached_2048:
             won = True
@@ -745,20 +795,44 @@ def draw_board(layout):
     available_width, _ = vec_xy(imgui.get_content_region_avail())
     board_width = cell * SIZE + gap * (SIZE - 1)
     indent = max(0, (available_width - board_width) / 2)
+    now = time.perf_counter()
 
     imgui.indent(indent)
+    origin_x, origin_y = vec_xy(imgui.get_cursor_screen_pos())
+
+    # Background grid stays static and full-size; animated tiles draw on top of it.
+    for r in range(SIZE):
+        for c in range(SIZE):
+            x = origin_x + c * (cell + gap)
+            y = origin_y + r * (cell + gap)
+            imgui.set_cursor_screen_pos((x, y))
+            imgui.push_style_color(imgui.Col_.button, tile_color(0))
+            imgui.push_style_color(imgui.Col_.button_hovered, tile_color(0))
+            imgui.push_style_color(imgui.Col_.button_active, tile_color(0))
+            imgui.button("##cell_{r}_{c}".format(r=r, c=c), (cell, cell))
+            imgui.pop_style_color(3)
+
     for r in range(SIZE):
         for c in range(SIZE):
             value = board[r][c]
-            label = "##tile_{r}_{c}".format(r=r, c=c)
+            if not value:
+                continue
+            tile_size = cell * tile_scale(r, c, now)
+            if tile_size < 1:
+                continue
+            offset = (cell - tile_size) / 2
+            x = origin_x + c * (cell + gap) + offset
+            y = origin_y + r * (cell + gap) + offset
+            imgui.set_cursor_screen_pos((x, y))
             imgui.push_style_color(imgui.Col_.button, tile_color(value))
             imgui.push_style_color(imgui.Col_.button_hovered, tile_color(value))
             imgui.push_style_color(imgui.Col_.button_active, tile_color(value))
-            imgui.button(label, (cell, cell))
-            draw_large_tile_number(value, cell)
+            imgui.button("##tile_{r}_{c}".format(r=r, c=c), (tile_size, tile_size))
+            draw_large_tile_number(value, tile_size)
             imgui.pop_style_color(3)
-            if c + 1 < SIZE:
-                imgui.same_line(0, gap)
+
+    imgui.set_cursor_screen_pos((origin_x, origin_y))
+    imgui.dummy((board_width, board_width))
     imgui.unindent(indent)
 
 def controls():
