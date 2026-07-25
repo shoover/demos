@@ -44,7 +44,6 @@ board = [[0] * SIZE for _ in range(SIZE)]
 score = 0
 best = load_best_score()
 moves = 0
-won = False
 game_over = False
 last_save_time = 0
 save_latencies_ms = deque(maxlen=SAVE_LATENCY_CAPACITY)
@@ -132,7 +131,6 @@ def serialize_game_state():
         "board": board,
         "score": score,
         "moves": moves,
-        "won": won,
         "game_over": game_over,
         "play_seconds": float(window.__get2048PlayTime()),
     }, separators=(",", ":"))
@@ -176,7 +174,7 @@ def refresh_save_latency_metrics():
     )
 
 def load_game_state():
-    global board, score, moves, won, game_over
+    global board, score, moves, game_over
 
     if not bool(window.__has2048GameState()):
         return False
@@ -196,14 +194,11 @@ def load_game_state():
     restored_board = validate_saved_board(state.get("board"))
     restored_score = require_nonnegative_int(state.get("score"), "score")
     restored_moves = require_nonnegative_int(state.get("moves"), "move count")
-    restored_won = state.get("won")
     restored_game_over = state.get("game_over")
     play_seconds = (
         0 if version == LEGACY_STATE_VERSION else state.get("play_seconds")
     )
 
-    if not isinstance(restored_won, bool):
-        raise ValueError(f"Invalid saved 2048 won state: {restored_won!r}")
     if not isinstance(restored_game_over, bool):
         raise ValueError(
             f"Invalid saved 2048 game-over state: {restored_game_over!r}"
@@ -221,17 +216,12 @@ def load_game_state():
         raise ValueError(
             f"Saved 2048 score {restored_score} exceeds best score {best}"
         )
-    if restored_won and not any(
-        tile >= 2048 for row in restored_board for tile in row
-    ):
-        raise ValueError("Saved 2048 won state has no winning tile")
     if restored_game_over == board_can_move(restored_board):
         raise ValueError("Saved 2048 game-over state does not match the board")
 
     board = restored_board
     score = restored_score
     moves = restored_moves
-    won = restored_won
     game_over = restored_game_over
     window.__set2048PlayTime(
         float(play_seconds),
@@ -248,11 +238,10 @@ def add_tile():
     return (r, c)
 
 def reset():
-    global board, score, moves, won, game_over, last_message
+    global board, score, moves, game_over, last_message
     board = [[0] * SIZE for _ in range(SIZE)]
     score = 0
     moves = 0
-    won = False
     game_over = False
     tile_animations.clear()
     sliding_tiles.clear()
@@ -326,7 +315,7 @@ def line_coordinates(direction):
     return None
 
 def move(direction):
-    global moves, won, game_over, last_message, slide_start
+    global moves, game_over, last_message, slide_start
     if game_over:
         return
 
@@ -366,9 +355,6 @@ def move(direction):
         new_cell = add_tile()
         if new_cell is not None:
             tile_animations[new_cell] = ("new", landed)
-        reached_2048 = not won and any(2048 in row for row in board)
-        if reached_2048:
-            won = True
 
         if not can_move():
             game_over = True
