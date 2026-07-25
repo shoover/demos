@@ -28,7 +28,6 @@ WINDOW_FLAGS = (
     | imgui.WindowFlags_.no_scrollbar
     | imgui.WindowFlags_.no_scroll_with_mouse
 )
-random.seed()
 
 def load_best_score():
     value = int(window.__get2048BestScore())
@@ -546,7 +545,7 @@ def draw_board(layout):
     for r in range(SIZE):
         for c in range(SIZE):
             draw_tile(
-                "##cell_{r}_{c}".format(r=r, c=c),
+                f"##cell_{r}_{c}",
                 origin_x + c * (cell + gap),
                 origin_y + r * (cell + gap),
                 cell,
@@ -565,7 +564,7 @@ def draw_board(layout):
             r = from_r + (to_r - from_r) * progress
             c = from_c + (to_c - from_c) * progress
             draw_tile(
-                "##slide_{index}".format(index=index),
+                f"##slide_{index}",
                 origin_x + c * (cell + gap),
                 origin_y + r * (cell + gap),
                 cell,
@@ -583,7 +582,7 @@ def draw_board(layout):
                     continue
                 offset = (cell - tile_size) / 2
                 draw_tile(
-                    "##tile_{r}_{c}".format(r=r, c=c),
+                    f"##tile_{r}_{c}",
                     origin_x + c * (cell + gap) + offset,
                     origin_y + r * (cell + gap) + offset,
                     tile_size,

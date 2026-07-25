@@ -428,6 +428,10 @@
 
         // Route SDL/Emscripten rendering to this page's canvas before importing imgui_bundle.
         pyodide.canvas.setCanvas2D(canvas);
+        // immapp.run() never returns: it hands the frame loop to Emscripten, which
+        // unwinds the stack by throwing a sentinel exception. Pyodide reports that
+        // unwind as a fatal error unless this flag is set. It is a private API, so
+        // expect a Pyodide upgrade to be where this breaks.
         pyodide._api._skip_unwind_fatal_error = true;
 
         log("Installing micropip…");
