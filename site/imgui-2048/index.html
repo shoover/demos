@@ -322,7 +322,7 @@ SAVE_METRICS_REFRESH_SECONDS = 1
 DESKTOP_CELL = 92
 DESKTOP_BOARD_GAP = 8
 BOARD_MARGIN = 14
-CONTROL_BUTTON_SIZE = (74, 54)
+CONTROL_BUTTON_SIZE = (74, 60)
 NEW_TILE_ANIM_SECONDS = 0.12
 MERGE_TILE_ANIM_SECONDS = 0.12
 SLIDE_SECONDS = 0.08
@@ -904,9 +904,10 @@ def controls():
     button_width, _ = CONTROL_BUTTON_SIZE
     available_width, _ = vec_xy(imgui.get_content_region_avail())
     spacing_x, _ = vec_xy(imgui.get_style().item_spacing)
-    row_width = button_width * 3 + spacing_x * 2
+    gap = 36
+    row_width = button_width * 3 + spacing_x * 2 + gap
     group_indent = max(0, (available_width - row_width) / 2)
-    up_indent = (button_width + spacing_x) * 2
+    up_indent = (button_width + spacing_x) * 2 + gap
 
     imgui.indent(group_indent)
     imgui.indent(up_indent)
@@ -919,7 +920,7 @@ def controls():
     imgui.same_line()
     if imgui.button(">##right", CONTROL_BUTTON_SIZE):
         move("right")
-    imgui.same_line()
+    imgui.same_line(0, spacing_x + gap)
     if imgui.button("v##down", CONTROL_BUTTON_SIZE):
         move("down")
     imgui.unindent(group_indent)
