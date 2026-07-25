@@ -970,8 +970,8 @@ def gui():
         p50, p90, p99, sample_count = save_latency_percentiles
         save_metrics = f"{p50:.0f}/{p90:.0f}/{p99:.0f} ms"
     imgui.text(
-        f"FPS: {hello_imgui.frame_rate():.1f}"
-        f" | Play time: {float(window.__get2048PlayTime()):.1f}s"
+        f"FPS: {hello_imgui.frame_rate():.0f}"
+        f" | Play time: {float(window.__get2048PlayTime()):.0f}s"
         f" | Save p50/90/99: {save_metrics}"
     )
     controls()
