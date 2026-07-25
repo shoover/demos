@@ -980,6 +980,8 @@ def gui():
 
 if load_game_state():
     last_message = "Saved game restored."
+    if game_over:
+        last_message += " No moves left. Press R or New Game."
     last_save_time = time.time()
 else:
     reset()
