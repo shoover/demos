@@ -1,14 +1,12 @@
 import json
 import math
-import random
 import time
 from collections import deque
 from js import window
 from imgui_bundle import imgui, immapp, hello_imgui
 
-SIZE = 4
-STATE_VERSION = 2
-LEGACY_STATE_VERSION = 1
+from board import SIZE, Game, decode_saved_state
+
 SAVE_INTERVAL_SECONDS = 5
 SAVE_LATENCY_CAPACITY = 256
 SAVE_METRICS_REFRESH_SECONDS = 1
@@ -40,25 +38,6 @@ def save_best_score(value):
         raise ValueError(f"Invalid 2048 best score: {value}")
     window.__set2048BestScore(int(value))
 
-board = [[0] * SIZE for _ in range(SIZE)]
-score = 0
-best = load_best_score()
-moves = 0
-game_over = False
-last_save_time = 0
-last_saved_state = None
-save_latencies_ms = deque(maxlen=SAVE_LATENCY_CAPACITY)
-save_latency_percentiles = None
-last_save_metrics_refresh = 0
-last_message = "Join matching tiles to reach 2048."
-tile_animations = {}  # (r, c) -> ("new" | "merge", start_time)
-# (value, (from_r, from_c), (to_r, to_c)) for every tile in flight after a move. Holds
-# pre-move values: a merge sends both source tiles to one cell, and the doubled value
-# only appears once they land.
-sliding_tiles = []
-slide_start = 0
-share_pending = False
-
 def ease_out_cubic(t):
     return 1 - (1 - t) ** 3
 
@@ -69,317 +48,185 @@ def ease_in_out_cubic(t):
         return 4 * t * t * t
     return 1 - (-2 * t + 2) ** 3 / 2
 
-def tile_scale(r, c, now):
-    anim = tile_animations.get((r, c))
-    if anim is None:
-        return 1.0
-    kind, start = anim
-    duration = NEW_TILE_ANIM_SECONDS if kind == "new" else MERGE_TILE_ANIM_SECONDS
-    elapsed = now - start
-    if elapsed >= duration:
-        del tile_animations[(r, c)]
-        return 1.0
-    # Negative while a tile waits for the slide to finish; hold it at the first frame
-    # rather than running the curve backwards.
-    t = max(0.0, elapsed / duration)
-    if kind == "new":
-        # Grow in from 60% size rather than popping from nothing.
-        return 0.6 + ease_out_cubic(t) * 0.4
-    # Merge: nudge past full size (1 -> 1.08) then settle back (1.08 -> 1).
-    if t < 0.5:
-        return 1 + ease_out_cubic(t / 0.5) * 0.08
-    return 1.08 - ease_out_cubic((t - 0.5) / 0.5) * 0.08
+class TileAnimations:
+    """Tile pops and the in-flight slide, replayed from a MoveResult.
 
-def empty_cells():
-    return [(r, c) for r in range(SIZE) for c in range(SIZE) if board[r][c] == 0]
-
-def is_valid_tile(value):
-    return (
-        isinstance(value, int)
-        and not isinstance(value, bool)
-        and (value == 0 or (value >= 2 and value & (value - 1) == 0))
-    )
-
-def require_nonnegative_int(value, name):
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        raise ValueError(f"Invalid saved 2048 {name}: {value!r}")
-    return value
-
-def validate_saved_board(value):
-    if (
-        not isinstance(value, list)
-        or len(value) != SIZE
-        or any(not isinstance(row, list) or len(row) != SIZE for row in value)
-        or any(not is_valid_tile(tile) for row in value for tile in row)
-    ):
-        raise ValueError("Invalid saved 2048 board")
-    return [row[:] for row in value]
-
-def board_can_move(value):
-    if any(tile == 0 for row in value for tile in row):
-        return True
-    for r in range(SIZE):
-        for c in range(SIZE):
-            if r + 1 < SIZE and value[r][c] == value[r + 1][c]:
-                return True
-            if c + 1 < SIZE and value[r][c] == value[r][c + 1]:
-                return True
-    return False
-
-def serialize_game_state():
-    return json.dumps({
-        "version": STATE_VERSION,
-        "board": board,
-        "score": score,
-        "moves": moves,
-        "game_over": game_over,
-        "play_seconds": float(window.__get2048PlayTime()),
-    }, separators=(",", ":"))
-
-def save_game_state():
-    global last_save_time, last_saved_state
-
-    started_at = time.perf_counter()
-    serialized = serialize_game_state()
-    window.__set2048GameState(serialized)
-    save_latencies_ms.append((time.perf_counter() - started_at) * 1000)
-    last_save_time = time.time()
-    last_saved_state = serialized
-
-def save_game_state_if_changed():
-    """Interval save, skipped when the snapshot would be byte-identical.
-
-    Play time is the only field that moves without a move being made, so once the
-    board is finished -- or merely idle, since the play clock pauses with the tab --
-    the interval save rewrites the same bytes to localStorage until the tab closes.
-    Charge the interval either way so the comparison runs on the interval, not per
-    frame.
+    Holds only presentation state: the board itself has already settled by the time a
+    move is handed over here.
     """
-    global last_save_time
 
-    if serialize_game_state() == last_saved_state:
-        last_save_time = time.time()
-        return
-    save_game_state()
+    def __init__(self):
+        self.scales = {}  # (r, c) -> ("new" | "merge", start_time)
+        self.sliding = []  # (value, source_cell, destination_cell)
+        self.slide_start = 0
 
-def refresh_save_latency_metrics():
-    global save_latency_percentiles, last_save_metrics_refresh
+    def clear(self):
+        self.scales.clear()
+        self.sliding.clear()
 
-    now = time.time()
-    if now - last_save_metrics_refresh < SAVE_METRICS_REFRESH_SECONDS:
-        return
-    last_save_metrics_refresh = now
+    def start_game(self, cells, now):
+        self.clear()
+        for cell in cells:
+            self.scales[cell] = ("new", now)
 
-    samples = sorted(save_latencies_ms)
-    if not samples:
-        save_latency_percentiles = None
-        return
-
-    def percentile(fraction):
-        position = (len(samples) - 1) * fraction
-        lower = math.floor(position)
-        upper = math.ceil(position)
-        if lower == upper:
-            return samples[lower]
-        weight = position - lower
-        return samples[lower] * (1 - weight) + samples[upper] * weight
-
-    save_latency_percentiles = (
-        percentile(0.50),
-        percentile(0.90),
-        percentile(0.99),
-        len(samples),
-    )
-
-def load_game_state():
-    global board, score, moves, game_over
-
-    if not bool(window.__has2048GameState()):
-        return False
-    serialized = window.__get2048GameState()
-
-    try:
-        state = json.loads(str(serialized))
-    except json.JSONDecodeError as error:
-        raise ValueError("Invalid saved 2048 game state JSON") from error
-
-    if not isinstance(state, dict):
-        raise ValueError("Invalid saved 2048 game state")
-    version = state.get("version")
-    if version not in (LEGACY_STATE_VERSION, STATE_VERSION):
-        raise ValueError("Unsupported saved 2048 game state version")
-
-    restored_board = validate_saved_board(state.get("board"))
-    restored_score = require_nonnegative_int(state.get("score"), "score")
-    restored_moves = require_nonnegative_int(state.get("moves"), "move count")
-    restored_game_over = state.get("game_over")
-    play_seconds = (
-        0 if version == LEGACY_STATE_VERSION else state.get("play_seconds")
-    )
-
-    if not isinstance(restored_game_over, bool):
-        raise ValueError(
-            f"Invalid saved 2048 game-over state: {restored_game_over!r}"
-        )
-    if (
-        isinstance(play_seconds, bool)
-        or not isinstance(play_seconds, (int, float))
-        or not math.isfinite(play_seconds)
-        or play_seconds < 0
-    ):
-        raise ValueError(
-            f"Invalid saved 2048 play time: {play_seconds!r}"
-        )
-    if restored_score > best:
-        raise ValueError(
-            f"Saved 2048 score {restored_score} exceeds best score {best}"
-        )
-    if restored_game_over == board_can_move(restored_board):
-        raise ValueError("Saved 2048 game-over state does not match the board")
-
-    board = restored_board
-    score = restored_score
-    moves = restored_moves
-    game_over = restored_game_over
-    window.__set2048PlayTime(
-        float(play_seconds),
-        restored_moves > 0 and not restored_game_over,
-    )
-    return True
-
-def add_tile():
-    cells = empty_cells()
-    if not cells:
-        return None
-    r, c = random.choice(cells)
-    board[r][c] = 4 if random.random() < 0.10 else 2
-    return (r, c)
-
-def reset():
-    global board, score, moves, game_over, last_message
-    board = [[0] * SIZE for _ in range(SIZE)]
-    score = 0
-    moves = 0
-    game_over = False
-    tile_animations.clear()
-    sliding_tiles.clear()
-    window.__set2048PlayTime(0, False)
-    last_message = "New game. Use arrow keys, WASD, or the buttons."
-    now = time.perf_counter()
-    for _ in range(2):
-        cell = add_tile()
-        if cell is not None:
-            tile_animations[cell] = ("new", now)
-    save_game_state()
-
-def compress_and_merge(line):
-    """Collapse one line toward index 0.
-
-    Returns (merged, merge_positions, sources). sources[j] lists the indices in the
-    input line whose tiles ended up at output index j -- one entry normally, two for a
-    merge -- which is what lets each tile be animated from its old cell to its new one.
-    """
-    global score, best
-    values = [(index, value) for index, value in enumerate(line) if value]
-    merged = []
-    merge_positions = set()
-    sources = []
-    gained = 0
-    i = 0
-    while i < len(values):
-        if i + 1 < len(values) and values[i][1] == values[i + 1][1]:
-            new_value = values[i][1] * 2
-            merged.append(new_value)
-            merge_positions.add(len(merged) - 1)
-            sources.append([values[i][0], values[i + 1][0]])
-            gained += new_value
-            i += 2
-        else:
-            merged.append(values[i][1])
-            sources.append([values[i][0]])
-            i += 1
-    merged += [0] * (SIZE - len(merged))
-    score += gained
-    if score > best:
-        best = score
-        save_best_score(best)
-    return merged, merge_positions, sources
-
-def can_move():
-    return board_can_move(board)
-
-def line_coordinates(direction):
-    """Board cells per line, ordered so index 0 is the edge tiles collapse toward.
-
-    Sliding needs each tile's origin and destination as board cells, so every direction
-    is expressed as an ordered coordinate list and collapsed by one shared loop.
-    """
-    if direction == "left":
-        return [[(r, c) for c in range(SIZE)] for r in range(SIZE)]
-    if direction == "right":
-        return [[(r, c) for c in reversed(range(SIZE))] for r in range(SIZE)]
-    if direction == "up":
-        return [[(r, c) for r in range(SIZE)] for c in range(SIZE)]
-    if direction == "down":
-        return [[(r, c) for r in reversed(range(SIZE))] for c in range(SIZE)]
-    return None
-
-def move(direction):
-    global moves, game_over, last_message, slide_start
-    if game_over:
-        return
-
-    lines = line_coordinates(direction)
-    if lines is None:
-        return
-
-    before = [row[:] for row in board]
-    merge_cells = set()
-    in_flight = []
-
-    for coordinates in lines:
-        line = [board[r][c] for r, c in coordinates]
-        merged, merge_positions, sources = compress_and_merge(line)
-        for index, (r, c) in enumerate(coordinates):
-            board[r][c] = merged[index]
-        merge_cells.update(coordinates[index] for index in merge_positions)
-        for index, source_indices in enumerate(sources):
-            destination = coordinates[index]
-            for source_index in source_indices:
-                in_flight.append(
-                    (line[source_index], coordinates[source_index], destination)
-                )
-
-    if board != before:
-        now = time.perf_counter()
-        tile_animations.clear()
-        sliding_tiles[:] = in_flight
-        slide_start = now
+    def start_move(self, result, now):
+        self.scales.clear()
+        self.sliding[:] = result.sliding_tiles
+        self.slide_start = now
         # Tiles travel first; pop and appear only start once they have landed, so a
         # merge reads as two tiles arriving and becoming one.
         landed = now + SLIDE_SECONDS
-        for cell in merge_cells:
-            tile_animations[cell] = ("merge", landed)
-        window.__start2048PlayTime()
-        moves += 1
-        new_cell = add_tile()
-        if new_cell is not None:
-            tile_animations[new_cell] = ("new", landed)
+        for cell in result.merged_cells:
+            self.scales[cell] = ("merge", landed)
+        self.scales[result.spawned_cell] = ("new", landed)
 
-        if not can_move():
-            game_over = True
-            window.__pause2048PlayTime()
-            last_message = "No moves left. Press R or New Game."
-        else:
-            last_message = ""
-        save_game_state()
+    def slide_progress(self, now):
+        """Eased 0..1 travel of the in-flight tiles, or None once they have landed."""
+        if not self.sliding:
+            return None
+        elapsed = now - self.slide_start
+        if elapsed >= SLIDE_SECONDS:
+            self.sliding.clear()
+            return None
+        return ease_in_out_cubic(elapsed / SLIDE_SECONDS)
+
+    def scale(self, r, c, now):
+        anim = self.scales.get((r, c))
+        if anim is None:
+            return 1.0
+        kind, start = anim
+        duration = NEW_TILE_ANIM_SECONDS if kind == "new" else MERGE_TILE_ANIM_SECONDS
+        elapsed = now - start
+        if elapsed >= duration:
+            del self.scales[(r, c)]
+            return 1.0
+        # Negative while a tile waits for the slide to finish; hold it at the first frame
+        # rather than running the curve backwards.
+        t = max(0.0, elapsed / duration)
+        if kind == "new":
+            # Grow in from 60% size rather than popping from nothing.
+            return 0.6 + ease_out_cubic(t) * 0.4
+        # Merge: nudge past full size (1 -> 1.08) then settle back (1.08 -> 1).
+        if t < 0.5:
+            return 1 + ease_out_cubic(t / 0.5) * 0.08
+        return 1.08 - ease_out_cubic((t - 0.5) / 0.5) * 0.08
+
+class SaveTracker:
+    """Persists game state through the bridge and reports how long the writes take."""
+
+    def __init__(self):
+        self.last_save_time = 0
+        self.last_state = None
+        self.latencies_ms = deque(maxlen=SAVE_LATENCY_CAPACITY)
+        self.percentiles = None
+        self.last_metrics_refresh = 0
+
+    def defer(self):
+        """Restart the interval without writing: storage already holds this state."""
+        self.last_save_time = time.time()
+
+    def save(self, game):
+        started_at = time.perf_counter()
+        serialized = game.encode(window.__get2048PlayTime())
+        window.__set2048GameState(serialized)
+        self.latencies_ms.append((time.perf_counter() - started_at) * 1000)
+        self.last_save_time = time.time()
+        self.last_state = serialized
+
+    def save_if_due(self, game):
+        """Interval save, skipped when the snapshot would be byte-identical.
+
+        Play time is the only field that moves without a move being made, so once the
+        board is finished -- or merely idle, since the play clock pauses with the tab --
+        the interval save would rewrite the same bytes until the tab closes.
+        """
+        if time.time() - self.last_save_time < SAVE_INTERVAL_SECONDS:
+            return
+        if game.encode(window.__get2048PlayTime()) == self.last_state:
+            self.defer()
+            return
+        self.save(game)
+
+    def refresh_metrics(self):
+        now = time.time()
+        if now - self.last_metrics_refresh < SAVE_METRICS_REFRESH_SECONDS:
+            return
+        self.last_metrics_refresh = now
+
+        samples = sorted(self.latencies_ms)
+        if not samples:
+            self.percentiles = None
+            return
+
+        def percentile(fraction):
+            position = (len(samples) - 1) * fraction
+            lower = math.floor(position)
+            upper = math.ceil(position)
+            if lower == upper:
+                return samples[lower]
+            weight = position - lower
+            return samples[lower] * (1 - weight) + samples[upper] * weight
+
+        self.percentiles = (
+            percentile(0.50),
+            percentile(0.90),
+            percentile(0.99),
+            len(samples),
+        )
+
+    def summary(self):
+        if self.percentiles is None:
+            return "collecting"
+        p50, p90, p99, _ = self.percentiles
+        return f"{p50:.0f}/{p90:.0f}/{p99:.0f} ms"
+
+class Hud:
+    """Status line, plus the one-shot share request the Share button raises."""
+
+    def __init__(self):
+        self.message = "Join matching tiles to reach 2048."
+        self.share_pending = False
+
+def start_new_game():
+    spawned = game.reset()
+    animations.start_game(spawned, time.perf_counter())
+    window.__set2048PlayTime(0, False)
+    hud.message = "New game. Use arrow keys, WASD, or the buttons."
+    saver.save(game)
+
+def apply_move(direction):
+    result = game.move(direction)
+    if result is None:
+        return
+
+    animations.start_move(result, time.perf_counter())
+    window.__start2048PlayTime()
+    if result.best_changed:
+        save_best_score(game.best)
+    if game.game_over:
+        window.__pause2048PlayTime()
+        hud.message = "No moves left. Press R or New Game."
+    else:
+        hud.message = ""
+    saver.save(game)
+
+def load_game_state():
+    if not bool(window.__has2048GameState()):
+        return False
+    saved = decode_saved_state(str(window.__get2048GameState()), game.best)
+    game.restore(saved)
+    window.__set2048PlayTime(
+        saved.play_seconds,
+        saved.moves > 0 and not saved.game_over,
+    )
+    return True
 
 def process_keyboard():
     for key in json.loads(window.__pop2048Keys()):
         if key == "restart":
-            reset()
+            start_new_game()
         else:
-            move(key)
+            apply_move(key)
 
 def viewport():
     data = json.loads(window.__game2048Viewport())
@@ -545,13 +392,12 @@ def draw_board(layout):
                 0,
             )
 
-    slide_elapsed = now - slide_start
-    if sliding_tiles and slide_elapsed < SLIDE_SECONDS:
+    progress = animations.slide_progress(now)
+    if progress is not None:
         # Mid-flight: draw the tiles travelling from their old cells rather than the
         # settled board, so a merge shows both tiles converging on the same square.
         # The tile spawned by this move is held back until they land.
-        progress = ease_in_out_cubic(slide_elapsed / SLIDE_SECONDS)
-        for index, (value, source, destination) in enumerate(sliding_tiles):
+        for index, (value, source, destination) in enumerate(animations.sliding):
             from_r, from_c = source
             to_r, to_c = destination
             r = from_r + (to_r - from_r) * progress
@@ -564,13 +410,12 @@ def draw_board(layout):
                 value,
             )
     else:
-        sliding_tiles.clear()
         for r in range(SIZE):
             for c in range(SIZE):
-                value = board[r][c]
+                value = game.cells[r][c]
                 if not value:
                     continue
-                tile_size = cell * tile_scale(r, c, now)
+                tile_size = cell * animations.scale(r, c, now)
                 if tile_size < 1:
                     continue
                 offset = (cell - tile_size) / 2
@@ -598,41 +443,40 @@ def controls():
     imgui.indent(group_indent)
     imgui.indent(up_indent)
     if imgui.button("^##up", CONTROL_BUTTON_SIZE):
-        move("up")
+        apply_move("up")
     imgui.unindent(up_indent)
 
     if imgui.button("<##left", CONTROL_BUTTON_SIZE):
-        move("left")
+        apply_move("left")
     imgui.same_line()
     if imgui.button(">##right", CONTROL_BUTTON_SIZE):
-        move("right")
+        apply_move("right")
     imgui.same_line(0, spacing_x + gap)
     if imgui.button("v##down", CONTROL_BUTTON_SIZE):
-        move("down")
+        apply_move("down")
     imgui.unindent(group_indent)
 
 def gui():
-    global share_pending
-
     process_keyboard()
-    if time.time() - last_save_time >= SAVE_INTERVAL_SECONDS:
-        save_game_state_if_changed()
-    refresh_save_latency_metrics()
+    saver.save_if_due(game)
+    saver.refresh_metrics()
 
     layout = window_layout()
     imgui.set_next_window_pos((layout["x"], layout["y"]), imgui.Cond_.always)
     imgui.set_next_window_size((layout["width"], layout["height"]), imgui.Cond_.always)
     imgui.begin("2048 in Python / Dear ImGui / WebAssembly", None, WINDOW_FLAGS)
 
-    imgui.text(f"Score: {score:,}  |  Moves: {moves:,}  |  Best: {best:,}")
+    imgui.text(
+        f"Score: {game.score:,}  |  Moves: {game.moves:,}  |  Best: {game.best:,}"
+    )
     score_min_x, score_top = vec_xy(imgui.get_item_rect_min())
     _, score_bottom = vec_xy(imgui.get_item_rect_max())
 
     if imgui.button("New Game"):
-        reset()
+        start_new_game()
     imgui.same_line()
     if imgui.button("Share"):
-        share_pending = True
+        hud.share_pending = True
     if not layout["compact"] and layout["content_width"] >= 500:
         imgui.same_line()
         imgui.text("Keyboard: arrows/WASD, swipe, R to restart")
@@ -646,17 +490,12 @@ def gui():
     draw_board(layout)
     imgui.separator()
 
-    imgui.text(last_message)
+    imgui.text(hud.message)
 
-    if save_latency_percentiles is None:
-        save_metrics = "collecting"
-    else:
-        p50, p90, p99, sample_count = save_latency_percentiles
-        save_metrics = f"{p50:.0f}/{p90:.0f}/{p99:.0f} ms"
     imgui.text(
         f"FPS: {hello_imgui.frame_rate():.0f}"
         f" | Play time: {float(window.__get2048PlayTime()):.0f}s"
-        f" | Save p50/90/99: {save_metrics}"
+        f" | Save p50/90/99: {saver.summary()}"
     )
     _, body_bottom = vec_xy(imgui.get_item_rect_max())
     controls()
@@ -664,8 +503,8 @@ def gui():
     # Queue the capture for the end of this frame: JS reads the pixels once imgui has
     # rendered them but before the browser composites the canvas away, so these rects
     # describe exactly the frame that gets captured.
-    if share_pending:
-        share_pending = False
+    if hud.share_pending:
+        hud.share_pending = False
         window_x, _ = vec_xy(imgui.get_window_pos())
         content_width = layout["content_width"]
         window.__share2048Screenshot(json.dumps({
@@ -686,20 +525,25 @@ def gui():
             # A point inside the window padding, left of the content, so the padding
             # around the stacked sections matches the window background exactly.
             "background": {"x": window_x + 3, "y": score_top + 2},
-            "filename": f"2048-score-{score}.png",
+            "filename": f"2048-score-{game.score}.png",
             "title": "2048",
-            "text": f"2048: {score:,} points in {moves:,} moves.",
+            "text": f"2048: {game.score:,} points in {game.moves:,} moves.",
         }))
 
     imgui.end()
 
+game = Game(best=load_best_score())
+animations = TileAnimations()
+saver = SaveTracker()
+hud = Hud()
+
 if load_game_state():
-    last_message = "Saved game restored."
-    if game_over:
-        last_message += " No moves left. Press R or New Game."
-    last_save_time = time.time()
+    hud.message = "Saved game restored."
+    if game.game_over:
+        hud.message += " No moves left. Press R or New Game."
+    saver.defer()
 else:
-    reset()
+    start_new_game()
 immapp.run(
     gui,
     window_title="2048 with imgui-bundle + Pyodide",
