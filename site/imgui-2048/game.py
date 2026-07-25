@@ -46,6 +46,7 @@ best = load_best_score()
 moves = 0
 game_over = False
 last_save_time = 0
+last_saved_state = None
 save_latencies_ms = deque(maxlen=SAVE_LATENCY_CAPACITY)
 save_latency_percentiles = None
 last_save_metrics_refresh = 0
@@ -136,13 +137,30 @@ def serialize_game_state():
     }, separators=(",", ":"))
 
 def save_game_state():
-    global last_save_time
+    global last_save_time, last_saved_state
 
     started_at = time.perf_counter()
     serialized = serialize_game_state()
     window.__set2048GameState(serialized)
     save_latencies_ms.append((time.perf_counter() - started_at) * 1000)
     last_save_time = time.time()
+    last_saved_state = serialized
+
+def save_game_state_if_changed():
+    """Interval save, skipped when the snapshot would be byte-identical.
+
+    Play time is the only field that moves without a move being made, so once the
+    board is finished -- or merely idle, since the play clock pauses with the tab --
+    the interval save rewrites the same bytes to localStorage until the tab closes.
+    Charge the interval either way so the comparison runs on the interval, not per
+    frame.
+    """
+    global last_save_time
+
+    if serialize_game_state() == last_saved_state:
+        last_save_time = time.time()
+        return
+    save_game_state()
 
 def refresh_save_latency_metrics():
     global save_latency_percentiles, last_save_metrics_refresh
@@ -288,15 +306,7 @@ def compress_and_merge(line):
     return merged, merge_positions, sources
 
 def can_move():
-    if empty_cells():
-        return True
-    for r in range(SIZE):
-        for c in range(SIZE):
-            if r + 1 < SIZE and board[r][c] == board[r + 1][c]:
-                return True
-            if c + 1 < SIZE and board[r][c] == board[r][c + 1]:
-                return True
-    return False
+    return board_can_move(board)
 
 def line_coordinates(direction):
     """Board cells per line, ordered so index 0 is the edge tiles collapse toward.
@@ -365,11 +375,7 @@ def move(direction):
         save_game_state()
 
 def process_keyboard():
-    try:
-        keys = json.loads(window.__pop2048Keys())
-    except Exception:
-        keys = []
-    for key in keys:
+    for key in json.loads(window.__pop2048Keys()):
         if key == "restart":
             reset()
         else:
@@ -401,40 +407,41 @@ def window_layout():
     line_height = imgui.get_text_line_height_with_spacing()
     controls_height = CONTROL_BUTTON_SIZE[1] * 2 + spacing_y
     header_lines = 2 if compact else 1
-    help_lines = 1 if compact or initial_content_width < 500 else 0
-    chrome_height = (
-        padding_y * 2
-        + line_height * header_lines
-        + imgui.get_frame_height_with_spacing()
-        + line_height * help_lines
-        + line_height * 2
-        + controls_height
-        + spacing_y * 4
-        + board_margin * 2
-    )
 
+    def chrome_height(help_lines):
+        """Everything stacked above and below the board, for a given help-line count."""
+        return (
+            padding_y * 2
+            + line_height * header_lines
+            + imgui.get_frame_height_with_spacing()
+            + line_height * help_lines
+            + line_height * 2
+            + controls_height
+            + spacing_y * 4
+            + board_margin * 2
+        )
+
+    def help_lines_for(content_width):
+        return 1 if compact or content_width < 500 else 0
+
+    # Chicken and egg: the board is sized by the height the chrome leaves it, but the
+    # help text wraps to a second line based on the width that board then implies. Size
+    # the board against an estimate from the width-limited board, then recompute the
+    # chrome once the final content width is known.
     board_width = min(
         desired_board_width,
         max_board_by_width,
-        max(1, available_height - chrome_height),
+        max(1, available_height - chrome_height(help_lines_for(initial_content_width))),
     )
     window_width = min(
         board_width + board_margin * 2 + padding_x * 2,
         available_width,
     )
     content_width = max(1, window_width - padding_x * 2)
-    help_lines = 1 if compact or content_width < 500 else 0
-    chrome_height = (
-        padding_y * 2
-        + line_height * header_lines
-        + imgui.get_frame_height_with_spacing()
-        + line_height * help_lines
-        + line_height * 2
-        + controls_height
-        + spacing_y * 4
-        + board_margin * 2
+    window_height = min(
+        chrome_height(help_lines_for(content_width)) + board_width,
+        available_height,
     )
-    window_height = min(chrome_height + board_width, available_height)
     x = max(margin, (width - window_width) / 2)
     y = max(margin, (height - window_height) / 2)
     return {
@@ -609,7 +616,7 @@ def gui():
 
     process_keyboard()
     if time.time() - last_save_time >= SAVE_INTERVAL_SECONDS:
-        save_game_state()
+        save_game_state_if_changed()
     refresh_save_latency_metrics()
 
     layout = window_layout()
