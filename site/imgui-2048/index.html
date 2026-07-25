@@ -77,7 +77,9 @@
     #overlay strong { color: #fff; }
     #overlay small { color: #9fb3c8; }
   </style>
-  <link rel="stylesheet" href="./mobile.css" media="(max-width: 700px)" />
+  <!-- This media query is the single source for the compact breakpoint: the script
+       reads it back off the element rather than repeating the pixel count. -->
+  <link id="mobile-stylesheet" rel="stylesheet" href="./mobile.css" media="(max-width: 700px)" />
 </head>
 <body>
   <header>
@@ -150,63 +152,32 @@
     document.addEventListener("contextmenu", (event) => event.preventDefault());
     resizeCanvasToDisplaySize();
 
-    window.__game2048Keys = [];
-    const INPUT_THROTTLE_MS = 120;
-    let lastAccepted2048InputTime = 0;
-    window.__queue2048Input = (input) => {
-      const now = performance.now();
-      if (now - lastAccepted2048InputTime < INPUT_THROTTLE_MS) {
+    const queuedInput = [];
+    // Set from Python at startup: the throttle exists so a held key cannot start a
+    // move before the previous slide has landed, which makes it a property of the
+    // animation, and the animation is Python's. Until it arrives there is no game to
+    // receive input, so keys pressed while Pyodide loads are dropped rather than
+    // queued up to fire all at once on the first frame.
+    let inputThrottleMs = null;
+    let lastAcceptedInputTime = 0;
+
+    function queueInput(input) {
+      if (inputThrottleMs === null) {
         return;
       }
-      lastAccepted2048InputTime = now;
-      window.__game2048Keys.push(input);
-    };
-    window.__pop2048Keys = () => {
-      const keys = window.__game2048Keys.slice();
-      window.__game2048Keys.length = 0;
-      return JSON.stringify(keys);
-    };
-    window.__game2048Viewport = () => JSON.stringify({
-      width: canvas.clientWidth,
-      height: canvas.clientHeight,
-      compact: window.matchMedia("(max-width: 700px)").matches
-    });
+      const now = performance.now();
+      if (now - lastAcceptedInputTime < inputThrottleMs) {
+        return;
+      }
+      lastAcceptedInputTime = now;
+      queuedInput.push(input);
+    }
+
+    const compactMedia = window.matchMedia(
+      document.getElementById("mobile-stylesheet").media
+    );
     const bestScoreKey = "imgui-2048.bestScore";
-    window.__get2048BestScore = () => {
-      const value = localStorage.getItem(bestScoreKey);
-      if (value === null) {
-        return 0;
-      }
-      if (!/^\d+$/.test(value)) {
-        throw new Error(`Invalid stored 2048 best score: ${value}`);
-      }
-      const bestScore = Number(value);
-      if (!Number.isSafeInteger(bestScore)) {
-        throw new Error(`Invalid stored 2048 best score: ${value}`);
-      }
-      return bestScore;
-    };
-    window.__set2048BestScore = (value) => {
-      if (!Number.isSafeInteger(value) || value < 0) {
-        throw new Error(`Invalid 2048 best score: ${value}`);
-      }
-      localStorage.setItem(bestScoreKey, String(value));
-    };
     const gameStateKey = "imgui-2048.gameState.v1";
-    window.__has2048GameState = () => localStorage.getItem(gameStateKey) !== null;
-    window.__get2048GameState = () => {
-      const value = localStorage.getItem(gameStateKey);
-      if (value === null) {
-        throw new Error("Missing saved 2048 game state");
-      }
-      return value;
-    };
-    window.__set2048GameState = (value) => {
-      if (typeof value !== "string") {
-        throw new Error("Invalid serialized 2048 game state");
-      }
-      localStorage.setItem(gameStateKey, value);
-    };
 
     let playTimeSeconds = 0;
     let playTimeStartedAt = null;
@@ -229,32 +200,6 @@
 
     document.addEventListener("visibilitychange", syncPlayTime);
 
-    window.__set2048PlayTime = (seconds, enabled) => {
-      if (!Number.isFinite(seconds) || seconds < 0) {
-        throw new Error(`Invalid 2048 play time: ${seconds}`);
-      }
-      settlePlayTime();
-      playTimeSeconds = seconds;
-      playTimeEnabled = Boolean(enabled);
-      syncPlayTime();
-    };
-    window.__start2048PlayTime = () => {
-      if (!playTimeEnabled) {
-        playTimeEnabled = true;
-        syncPlayTime();
-      }
-    };
-    window.__pause2048PlayTime = () => {
-      settlePlayTime();
-      playTimeEnabled = false;
-    };
-    window.__get2048PlayTime = () => {
-      if (playTimeStartedAt === null) {
-        return playTimeSeconds;
-      }
-      return playTimeSeconds + (performance.now() - playTimeStartedAt) / 1000;
-    };
-
     const keyMap = new Map([
       ["ArrowUp", "up"], ["w", "up"], ["W", "up"],
       ["ArrowDown", "down"], ["s", "down"], ["S", "down"],
@@ -270,7 +215,7 @@
         if (event.repeat) {
           return;
         }
-        window.__queue2048Input(mapped);
+        queueInput(mapped);
       }
     }, { passive: false });
 
@@ -321,9 +266,9 @@
 
       event.preventDefault();
       if (absX > absY) {
-        window.__queue2048Input(dx > 0 ? "right" : "left");
+        queueInput(dx > 0 ? "right" : "left");
       } else {
-        window.__queue2048Input(dy > 0 ? "down" : "up");
+        queueInput(dy > 0 ? "down" : "up");
       }
     }, { passive: false });
 
@@ -415,8 +360,95 @@
       setTimeout(clearStatus, 6000);
     }
 
-    window.__share2048Screenshot = (payload) => {
-      pendingCapture = JSON.parse(payload);
+    // The whole surface Python talks to. One object rather than a dozen window.__*
+    // globals, bound once on the Python side. Everything read per frame -- input,
+    // viewport, play time -- returns plain values or a plain object so Pyodide hands
+    // Python something it can read directly instead of a JSON string to parse.
+    window.game2048 = {
+      setInputThrottleMs(milliseconds) {
+        if (!Number.isFinite(milliseconds) || milliseconds < 0) {
+          throw new Error(`Invalid 2048 input throttle: ${milliseconds}`);
+        }
+        inputThrottleMs = milliseconds;
+      },
+
+      popInput() {
+        const input = queuedInput.slice();
+        queuedInput.length = 0;
+        return input;
+      },
+
+      viewport() {
+        return {
+          width: canvas.clientWidth,
+          height: canvas.clientHeight,
+          compact: compactMedia.matches
+        };
+      },
+
+      bestScore() {
+        const value = localStorage.getItem(bestScoreKey);
+        if (value === null) {
+          return 0;
+        }
+        if (!/^\d+$/.test(value)) {
+          throw new Error(`Invalid stored 2048 best score: ${value}`);
+        }
+        const bestScore = Number(value);
+        if (!Number.isSafeInteger(bestScore)) {
+          throw new Error(`Invalid stored 2048 best score: ${value}`);
+        }
+        return bestScore;
+      },
+
+      setBestScore(value) {
+        if (!Number.isSafeInteger(value) || value < 0) {
+          throw new Error(`Invalid 2048 best score: ${value}`);
+        }
+        localStorage.setItem(bestScoreKey, String(value));
+      },
+
+      hasState() {
+        return localStorage.getItem(gameStateKey) !== null;
+      },
+
+      state() {
+        const value = localStorage.getItem(gameStateKey);
+        if (value === null) {
+          throw new Error("Missing saved 2048 game state");
+        }
+        return value;
+      },
+
+      setState(value) {
+        if (typeof value !== "string") {
+          throw new Error("Invalid serialized 2048 game state");
+        }
+        localStorage.setItem(gameStateKey, value);
+      },
+
+      playTime() {
+        if (playTimeStartedAt === null) {
+          return playTimeSeconds;
+        }
+        return playTimeSeconds + (performance.now() - playTimeStartedAt) / 1000;
+      },
+
+      // Subsumes the old start/pause pair: every caller already knows both the
+      // elapsed seconds and whether the clock should be running.
+      setPlayTime(seconds, enabled) {
+        if (!Number.isFinite(seconds) || seconds < 0) {
+          throw new Error(`Invalid 2048 play time: ${seconds}`);
+        }
+        settlePlayTime();
+        playTimeSeconds = seconds;
+        playTimeEnabled = Boolean(enabled);
+        syncPlayTime();
+      },
+
+      share(payload) {
+        pendingCapture = JSON.parse(payload);
+      }
     };
 
     async function main() {

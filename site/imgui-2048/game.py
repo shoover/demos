@@ -7,6 +7,9 @@ from imgui_bundle import imgui, immapp, hello_imgui
 
 from board import SIZE, Game, decode_saved_state
 
+# Everything the page exposes to Python, bound once. index.html builds it.
+bridge = window.game2048
+
 SAVE_INTERVAL_SECONDS = 5
 SAVE_LATENCY_CAPACITY = 256
 SAVE_METRICS_REFRESH_SECONDS = 1
@@ -17,6 +20,10 @@ CONTROL_BUTTON_SIZE = (74, 60)
 NEW_TILE_ANIM_SECONDS = 0.12
 MERGE_TILE_ANIM_SECONDS = 0.12
 SLIDE_SECONDS = 0.08
+# A held key must not start a move before the previous one has landed, so the input
+# throttle is a property of the slide rather than of the key handler. JS owns the key
+# and touch listeners; Python owns the duration and hands it over at startup.
+INPUT_THROTTLE_MS = SLIDE_SECONDS * 1000 * 1.5
 WINDOW_FLAGS = (
     imgui.WindowFlags_.no_title_bar
     | imgui.WindowFlags_.no_resize
@@ -28,7 +35,7 @@ WINDOW_FLAGS = (
 )
 
 def load_best_score():
-    value = int(window.__get2048BestScore())
+    value = int(bridge.bestScore())
     if value < 0:
         raise ValueError(f"Invalid stored 2048 best score: {value}")
     return value
@@ -36,7 +43,7 @@ def load_best_score():
 def save_best_score(value):
     if value < 0:
         raise ValueError(f"Invalid 2048 best score: {value}")
-    window.__set2048BestScore(int(value))
+    bridge.setBestScore(int(value))
 
 def ease_out_cubic(t):
     return 1 - (1 - t) ** 3
@@ -127,8 +134,8 @@ class SaveTracker:
 
     def save(self, game):
         started_at = time.perf_counter()
-        serialized = game.encode(window.__get2048PlayTime())
-        window.__set2048GameState(serialized)
+        serialized = game.encode(bridge.playTime())
+        bridge.setState(serialized)
         self.latencies_ms.append((time.perf_counter() - started_at) * 1000)
         self.last_save_time = time.time()
         self.last_state = serialized
@@ -142,7 +149,7 @@ class SaveTracker:
         """
         if time.time() - self.last_save_time < SAVE_INTERVAL_SECONDS:
             return
-        if game.encode(window.__get2048PlayTime()) == self.last_state:
+        if game.encode(bridge.playTime()) == self.last_state:
             self.defer()
             return
         self.save(game)
@@ -190,7 +197,7 @@ class Hud:
 def start_new_game():
     spawned = game.reset()
     animations.start_game(spawned, time.perf_counter())
-    window.__set2048PlayTime(0, False)
+    bridge.setPlayTime(0, False)
     hud.message = "New game. Use arrow keys, WASD, or the buttons."
     saver.save(game)
 
@@ -200,40 +207,40 @@ def apply_move(direction):
         return
 
     animations.start_move(result, time.perf_counter())
-    window.__start2048PlayTime()
+    # The clock runs from the first move until the board locks, which is exactly
+    # "a move just happened and the game is not over".
+    bridge.setPlayTime(bridge.playTime(), not game.game_over)
     if result.best_changed:
         save_best_score(game.best)
     if game.game_over:
-        window.__pause2048PlayTime()
         hud.message = "No moves left. Press R or New Game."
     else:
         hud.message = ""
     saver.save(game)
 
 def load_game_state():
-    if not bool(window.__has2048GameState()):
+    if not bridge.hasState():
         return False
-    saved = decode_saved_state(str(window.__get2048GameState()), game.best)
+    saved = decode_saved_state(bridge.state(), game.best)
     game.restore(saved)
-    window.__set2048PlayTime(
+    bridge.setPlayTime(
         saved.play_seconds,
         saved.moves > 0 and not saved.game_over,
     )
     return True
 
 def process_keyboard():
-    for key in json.loads(window.__pop2048Keys()):
+    for key in bridge.popInput():
         if key == "restart":
             start_new_game()
         else:
             apply_move(key)
 
 def viewport():
-    data = json.loads(window.__game2048Viewport())
-    width = max(1, int(data["width"]))
-    height = max(1, int(data["height"]))
-    compact = bool(data["compact"]) or width < 700
-    return width, height, compact
+    data = bridge.viewport()
+    width = max(1, int(data.width))
+    height = max(1, int(data.height))
+    return width, height, bool(data.compact)
 
 def window_layout():
     width, height, compact = viewport()
@@ -494,7 +501,7 @@ def gui():
 
     imgui.text(
         f"FPS: {hello_imgui.frame_rate():.0f}"
-        f" | Play time: {float(window.__get2048PlayTime()):.0f}s"
+        f" | Play time: {float(bridge.playTime()):.0f}s"
         f" | Save p50/90/99: {saver.summary()}"
     )
     _, body_bottom = vec_xy(imgui.get_item_rect_max())
@@ -507,7 +514,9 @@ def gui():
         hud.share_pending = False
         window_x, _ = vec_xy(imgui.get_window_pos())
         content_width = layout["content_width"]
-        window.__share2048Screenshot(json.dumps({
+        # Still a JSON string: this crosses once per Share click, not per frame, and a
+        # nested payload is cheaper to hand over as text than to convert field by field.
+        bridge.share(json.dumps({
             "sections": [
                 {
                     "x": score_min_x,
@@ -532,6 +541,7 @@ def gui():
 
     imgui.end()
 
+bridge.setInputThrottleMs(INPUT_THROTTLE_MS)
 game = Game(best=load_best_score())
 animations = TileAnimations()
 saver = SaveTracker()
