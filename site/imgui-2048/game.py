@@ -541,22 +541,37 @@ def gui():
 
     imgui.end()
 
+def start():
+    """Restore or begin a game. False means startup stalled on a corrupt save."""
+    try:
+        restored = load_game_state()
+    except ValueError as error:
+        # Rejecting the save is right, but raising here only reaches the "Startup
+        # failed" overlay, and the next reload reads the same bad key: the page is
+        # bricked. Escalate to the user with the reason and an action instead of
+        # either dead-ending or quietly overwriting what they had.
+        bridge.reportCorruptState(str(error))
+        return False
+
+    if restored:
+        hud.message = "Saved game restored."
+        if game.game_over:
+            hud.message += " No moves left. Press R or New Game."
+        saver.defer()
+    else:
+        start_new_game()
+    return True
+
 bridge.setInputThrottleMs(INPUT_THROTTLE_MS)
 game = Game(best=load_best_score())
 animations = TileAnimations()
 saver = SaveTracker()
 hud = Hud()
 
-if load_game_state():
-    hud.message = "Saved game restored."
-    if game.game_over:
-        hud.message += " No moves left. Press R or New Game."
-    saver.defer()
-else:
-    start_new_game()
-immapp.run(
-    gui,
-    window_title="2048 with imgui-bundle + Pyodide",
-    window_size=(720, 760),
-    fps_idle=0,
-)
+if start():
+    immapp.run(
+        gui,
+        window_title="2048 with imgui-bundle + Pyodide",
+        window_size=(720, 760),
+        fps_idle=0,
+    )

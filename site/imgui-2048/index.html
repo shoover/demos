@@ -76,6 +76,23 @@
 
     #overlay strong { color: #fff; }
     #overlay small { color: #9fb3c8; }
+
+    /* Only the recovery overlay takes clicks. The loading one must stay
+       transparent to input so it never swallows a swipe aimed at the canvas. */
+    #overlay.actionable { pointer-events: auto; }
+
+    #overlay button {
+      margin-top: 10px;
+      padding: 6px 12px;
+      border: 1px solid rgba(255, 255, 255, 0.24);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.08);
+      color: inherit;
+      font: inherit;
+      cursor: pointer;
+    }
+
+    #overlay button:hover { background: rgba(255, 255, 255, 0.16); }
   </style>
   <!-- This media query is the single source for the compact breakpoint: the script
        reads it back off the element rather than repeating the pixel count. -->
@@ -448,6 +465,42 @@
 
       share(payload) {
         pendingCapture = JSON.parse(payload);
+      },
+
+      // A save the validator rejects is a permanent dead end on its own: every
+      // reload reads the same bad key and fails the same way. Say what is wrong and
+      // offer the one action that clears it, rather than discarding the save
+      // silently or leaving the page stuck on "Startup failed".
+      reportCorruptState(reason) {
+        const heading = document.createElement("strong");
+        heading.textContent = "Saved game was corrupt.";
+        const detail = document.createElement("small");
+        detail.textContent = String(reason);
+        const consequence = document.createElement("small");
+        consequence.textContent =
+          "Starting fresh discards the saved game and the best score.";
+        const button = document.createElement("button");
+        button.textContent = "Start fresh";
+        button.addEventListener("click", () => {
+          // Both keys: the saved score is validated against the best score, so
+          // clearing one and keeping the other is how this state is reached.
+          localStorage.removeItem(gameStateKey);
+          localStorage.removeItem(bestScoreKey);
+          location.reload();
+        });
+
+        overlayEl.replaceChildren(
+          heading,
+          document.createElement("br"),
+          detail,
+          document.createElement("br"),
+          consequence,
+          document.createElement("br"),
+          button
+        );
+        overlayEl.classList.add("actionable");
+        overlayEl.style.display = "";
+        log(`Saved game was corrupt: ${reason}`);
       }
     };
 
