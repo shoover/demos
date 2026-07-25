@@ -309,6 +309,9 @@ def window_layout():
         "compact": compact,
     }
 
+# Packed ABGR, the byte order the draw list takes directly.
+TILE_TEXT_COLOR = 0xffffffff
+
 def tile_color(value):
     # Dear ImGui expects normalized RGBA floats.
     palette = {
@@ -337,29 +340,25 @@ def text_size(text, font_size):
     scale = font_size / imgui.get_font_size()
     return base_width * scale, base_height * scale
 
-def draw_large_tile_number(value, cell):
+def draw_large_tile_number(value, x, y, size):
     if not value:
         return
 
-    draw_list = imgui.get_window_draw_list()
-    tile_min = imgui.get_item_rect_min()
-    tile_max = imgui.get_item_rect_max()
-    min_x, min_y = vec_xy(tile_min)
-    max_x, max_y = vec_xy(tile_max)
-
     text = str(value)
-    tile_width = max_x - min_x
-    tile_height = max_y - min_y
     if value < 128:
-        font_size = cell * 0.50
+        font_size = size * 0.50
     elif value < 1024:
-        font_size = cell * 0.43
+        font_size = size * 0.43
     else:
-        font_size = cell * 0.36
+        font_size = size * 0.36
     width, height = text_size(text, font_size)
-    x = min_x + (tile_width - width) / 2
-    y = min_y + (tile_height - height) / 2
-    draw_list.add_text(imgui.get_font(), font_size, (x, y), 0xffffffff, text)
+    imgui.get_window_draw_list().add_text(
+        imgui.get_font(),
+        font_size,
+        (x + (size - width) / 2, y + (size - height) / 2),
+        TILE_TEXT_COLOR,
+        text,
+    )
 
 def board_metrics(target_board_width, compact):
     gap = 6 if compact else DESKTOP_BOARD_GAP
@@ -367,16 +366,20 @@ def board_metrics(target_board_width, compact):
     cell = max(36, min(DESKTOP_CELL, cell))
     return cell, gap
 
-def draw_tile(label, x, y, size, value):
-    """Draw one tile square at an absolute screen position. value 0 draws a grid cell."""
-    imgui.set_cursor_screen_pos((x, y))
-    color = tile_color(value)
-    imgui.push_style_color(imgui.Col_.button, color)
-    imgui.push_style_color(imgui.Col_.button_hovered, color)
-    imgui.push_style_color(imgui.Col_.button_active, color)
-    imgui.button(label, (size, size))
-    draw_large_tile_number(value, size)
-    imgui.pop_style_color(3)
+def draw_tile(x, y, size, value):
+    """Draw one tile square at an absolute screen position. value 0 draws a grid cell.
+
+    Tiles are painted rather than laid out: they overlap, move between cells, and
+    scale independently of the grid, none of which a widget would agree to do. The
+    board reserves its space once, with the dummy at the end of draw_board.
+    """
+    imgui.get_window_draw_list().add_rect_filled(
+        (x, y),
+        (x + size, y + size),
+        imgui.color_convert_float4_to_u32(imgui.ImVec4(*tile_color(value))),
+        imgui.get_style().frame_rounding,
+    )
+    draw_large_tile_number(value, x, y, size)
 
 def draw_board(layout):
     cell, gap = board_metrics(layout["board_width"], layout["compact"])
@@ -392,7 +395,6 @@ def draw_board(layout):
     for r in range(SIZE):
         for c in range(SIZE):
             draw_tile(
-                f"##cell_{r}_{c}",
                 origin_x + c * (cell + gap),
                 origin_y + r * (cell + gap),
                 cell,
@@ -404,13 +406,12 @@ def draw_board(layout):
         # Mid-flight: draw the tiles travelling from their old cells rather than the
         # settled board, so a merge shows both tiles converging on the same square.
         # The tile spawned by this move is held back until they land.
-        for index, (value, source, destination) in enumerate(animations.sliding):
+        for value, source, destination in animations.sliding:
             from_r, from_c = source
             to_r, to_c = destination
             r = from_r + (to_r - from_r) * progress
             c = from_c + (to_c - from_c) * progress
             draw_tile(
-                f"##slide_{index}",
                 origin_x + c * (cell + gap),
                 origin_y + r * (cell + gap),
                 cell,
@@ -427,7 +428,6 @@ def draw_board(layout):
                     continue
                 offset = (cell - tile_size) / 2
                 draw_tile(
-                    f"##tile_{r}_{c}",
                     origin_x + c * (cell + gap) + offset,
                     origin_y + r * (cell + gap) + offset,
                     tile_size,
