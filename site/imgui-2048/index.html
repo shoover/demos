@@ -100,6 +100,30 @@
     const overlayEl = document.getElementById("overlay");
     const canvas = document.getElementById("canvas");
 
+    // The WebGL drawing buffer is only readable until the browser composites it, so a
+    // screenshot has to be taken inside the frame that drew it. imgui-bundle drives its
+    // main loop from requestAnimationFrame, so wrapping rAF here -- before Pyodide loads
+    // and emscripten schedules its first frame -- gives us a hook that runs right after
+    // the frame is rendered and before it is composited away.
+    let pendingCapture = null;
+    const originalRequestAnimationFrame = window.requestAnimationFrame.bind(window);
+    window.requestAnimationFrame = (callback) => originalRequestAnimationFrame((time) => {
+      callback(time);
+      if (pendingCapture === null) {
+        return;
+      }
+      const spec = pendingCapture;
+      pendingCapture = null;
+      shareScreenshot(spec).catch((error) => {
+        if (error && error.name === "AbortError") {
+          return;
+        }
+        console.error(error);
+        log(`Share failed: ${error && error.message ? error.message : error}`);
+        setTimeout(clearStatus, 4000);
+      });
+    });
+
     function log(message) {
       statusEl.hidden = false;
       statusEl.textContent = message;
@@ -304,6 +328,96 @@
 
     canvas.addEventListener("touchcancel", resetTouchStart);
 
+    const samplerCanvas = document.createElement("canvas");
+    samplerCanvas.width = 1;
+    samplerCanvas.height = 1;
+
+    function samplePixel(x, y) {
+      const context = samplerCanvas.getContext("2d", { willReadFrequently: true });
+      context.clearRect(0, 0, 1, 1);
+      context.drawImage(canvas, Math.round(x), Math.round(y), 1, 1, 0, 0, 1, 1);
+      const [r, g, b] = context.getImageData(0, 0, 1, 1).data;
+      return `rgb(${r}, ${g}, ${b})`;
+    }
+
+    // Python hands over the canvas rects of the pieces worth sharing -- the score line
+    // and the board/message/stats block -- and they get stacked into one image so the
+    // buttons and help text sitting between them are left out.
+    function composeScreenshot(spec) {
+      const scale = canvas.width / canvas.clientWidth;
+      const pad = Math.round(12 * scale);
+      const gap = Math.round(10 * scale);
+      const sections = spec.sections.map((section) => ({
+        x: Math.round(section.x * scale),
+        y: Math.round(section.y * scale),
+        width: Math.round(section.width * scale),
+        height: Math.round(section.height * scale)
+      }));
+      if (sections.some((section) => section.width < 1 || section.height < 1)) {
+        throw new Error("Screenshot region is empty");
+      }
+
+      const contentWidth = Math.max(...sections.map((section) => section.width));
+      const contentHeight =
+        sections.reduce((total, section) => total + section.height, 0) +
+        gap * (sections.length - 1);
+
+      const shot = document.createElement("canvas");
+      shot.width = contentWidth + pad * 2;
+      shot.height = contentHeight + pad * 2;
+      const context = shot.getContext("2d");
+      context.fillStyle = samplePixel(spec.background.x * scale, spec.background.y * scale);
+      context.fillRect(0, 0, shot.width, shot.height);
+
+      let y = pad;
+      for (const section of sections) {
+        context.drawImage(
+          canvas,
+          section.x, section.y, section.width, section.height,
+          pad + (contentWidth - section.width) / 2, y, section.width, section.height
+        );
+        y += section.height + gap;
+      }
+      return shot;
+    }
+
+    async function shareScreenshot(spec) {
+      const shot = composeScreenshot(spec);
+      const blob = await new Promise((resolve, reject) => {
+        shot.toBlob(
+          (result) => (result ? resolve(result) : reject(new Error("Screenshot encoding failed"))),
+          "image/png"
+        );
+      });
+      const file = new File([blob], spec.filename, { type: "image/png" });
+
+      if (navigator.canShare && navigator.canShare({ files: [file] })) {
+        await navigator.share({ files: [file], title: spec.title, text: spec.text });
+        return;
+      }
+
+      // No file sharing: desktop Chrome/Firefox never offer it, and every browser hides
+      // the Web Share API on insecure origins -- which is what a phone hitting this page
+      // over a LAN IP gets. Save the screenshot instead and name the reason, because
+      // "insecure origin" is fixable by serving over localhost or https.
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = spec.filename;
+      link.click();
+      URL.revokeObjectURL(url);
+      log(
+        window.isSecureContext
+          ? `This browser cannot share files; saved ${spec.filename}.`
+          : `Sharing needs a secure origin (localhost or https); saved ${spec.filename}.`
+      );
+      setTimeout(clearStatus, 6000);
+    }
+
+    window.__share2048Screenshot = (payload) => {
+      pendingCapture = JSON.parse(payload);
+    };
+
     const pythonCode = String.raw`
 import json
 import math
@@ -365,6 +479,7 @@ tile_animations = {}  # (r, c) -> ("new" | "merge", start_time)
 # only appears once they land.
 sliding_tiles = []
 slide_start = 0
+share_pending = False
 
 def ease_out_cubic(t):
     return 1 - (1 - t) ** 3
@@ -926,6 +1041,8 @@ def controls():
     imgui.unindent(group_indent)
 
 def gui():
+    global share_pending
+
     process_keyboard()
     if time.time() - last_save_time >= SAVE_INTERVAL_SECONDS:
         save_game_state()
@@ -937,9 +1054,14 @@ def gui():
     imgui.begin("2048 in Python / Dear ImGui / WebAssembly", None, WINDOW_FLAGS)
 
     imgui.text(f"Score: {score:,}  |  Moves: {moves:,}  |  Best: {best:,}")
+    score_min_x, score_top = vec_xy(imgui.get_item_rect_min())
+    _, score_bottom = vec_xy(imgui.get_item_rect_max())
 
     if imgui.button("New Game"):
         reset()
+    imgui.same_line()
+    if imgui.button("Share"):
+        share_pending = True
     if not layout["compact"] and layout["content_width"] >= 500:
         imgui.same_line()
         imgui.text("Keyboard: arrows/WASD, swipe, R to restart")
@@ -949,6 +1071,7 @@ def gui():
         imgui.text("Swipe to move. R restarts.")
 
     imgui.separator()
+    _, body_top = vec_xy(imgui.get_cursor_screen_pos())
     draw_board(layout)
     imgui.separator()
 
@@ -964,7 +1087,38 @@ def gui():
         f" | Play time: {float(window.__get2048PlayTime()):.0f}s"
         f" | Save p50/90/99: {save_metrics}"
     )
+    _, body_bottom = vec_xy(imgui.get_item_rect_max())
     controls()
+
+    # Queue the capture for the end of this frame: JS reads the pixels once imgui has
+    # rendered them but before the browser composites the canvas away, so these rects
+    # describe exactly the frame that gets captured.
+    if share_pending:
+        share_pending = False
+        window_x, _ = vec_xy(imgui.get_window_pos())
+        content_width = layout["content_width"]
+        window.__share2048Screenshot(json.dumps({
+            "sections": [
+                {
+                    "x": score_min_x,
+                    "y": score_top,
+                    "width": content_width,
+                    "height": score_bottom - score_top,
+                },
+                {
+                    "x": score_min_x,
+                    "y": body_top,
+                    "width": content_width,
+                    "height": body_bottom - body_top,
+                },
+            ],
+            # A point inside the window padding, left of the content, so the padding
+            # around the stacked sections matches the window background exactly.
+            "background": {"x": window_x + 3, "y": score_top + 2},
+            "filename": f"2048-score-{score}.png",
+            "title": "2048",
+            "text": f"2048: {score:,} points in {moves:,} moves.",
+        }))
 
     imgui.end()
 
