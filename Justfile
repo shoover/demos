@@ -5,3 +5,7 @@ generate-index:
 
 serve: generate-index
     python3 -m http.server --directory site {{port}}
+
+# Stdlib unittest only: the demos' dependencies are loaded by the browser.
+test:
+    python3 -m unittest discover --start-directory tests
