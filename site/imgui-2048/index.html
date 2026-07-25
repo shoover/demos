@@ -936,17 +936,7 @@ def gui():
     imgui.set_next_window_size((layout["width"], layout["height"]), imgui.Cond_.always)
     imgui.begin("2048 in Python / Dear ImGui / WebAssembly", None, WINDOW_FLAGS)
 
-    if layout["compact"]:
-        imgui.text(f"2048  Score: {score}")
-        imgui.text(f"Best: {best}  Moves: {moves}")
-    else:
-        imgui.text("2048")
-        imgui.same_line()
-        imgui.text(f"Score: {score}")
-        imgui.same_line()
-        imgui.text(f"Best: {best}")
-        imgui.same_line()
-        imgui.text(f"Moves: {moves}")
+    imgui.text(f"Score: {score:,}  |  Moves: {moves:,}  |  Best: {best:,}")
 
     if imgui.button("New Game"):
         reset()
