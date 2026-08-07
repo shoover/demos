@@ -2,10 +2,17 @@ import json
 import math
 import time
 from collections import deque
+from typing import NamedTuple
 from js import window
 from imgui_bundle import imgui, immapp, hello_imgui
 
 from board import SIZE, Game, decode_saved_state
+from layout import (
+    COMPACT_HELP,
+    CONTROL_BUTTON_SIZE,
+    StyleMetrics,
+    compute_layout,
+)
 
 # Everything the page exposes to Python, bound once. index.html builds it.
 bridge = window.game2048
@@ -13,17 +20,14 @@ bridge = window.game2048
 SAVE_INTERVAL_SECONDS = 5
 SAVE_LATENCY_CAPACITY = 256
 SAVE_METRICS_REFRESH_SECONDS = 1
-DESKTOP_CELL = 92
-DESKTOP_BOARD_GAP = 8
-BOARD_MARGIN = 14
-CONTROL_BUTTON_SIZE = (74, 60)
 NEW_TILE_ANIM_SECONDS = 0.12
 MERGE_TILE_ANIM_SECONDS = 0.12
 SLIDE_SECONDS = 0.08
-# A held key must not start a move before the previous one has landed, so the input
-# throttle is a property of the slide rather than of the key handler. JS owns the key
-# and touch listeners; Python owns the duration and hands it over at startup.
-INPUT_THROTTLE_MS = SLIDE_SECONDS * 1000 * 1.5
+# A held key or a hammered button must not start a move before the previous one has
+# landed, so the throttle is a property of the slide rather than of any one input
+# device. It lives here because both input paths -- the JS key/touch listeners and the
+# on-screen buttons, which are imgui widgets JS never sees -- funnel through apply_move.
+INPUT_THROTTLE_SECONDS = SLIDE_SECONDS * 1.5
 WINDOW_FLAGS = (
     imgui.WindowFlags_.no_title_bar
     | imgui.WindowFlags_.no_resize
@@ -65,11 +69,18 @@ class TileAnimations:
     def __init__(self):
         self.scales = {}  # (r, c) -> ("new" | "merge", start_time)
         self.sliding = []  # (value, source_cell, destination_cell)
-        self.slide_start = 0
+        # Doubles as the throttle's clock. -inf so the first move of a board is never
+        # held back; slide_progress only reads it while tiles are actually in flight.
+        self.slide_start = -math.inf
 
     def clear(self):
         self.scales.clear()
         self.sliding.clear()
+        # A fresh board owes nothing to the previous move: accept input immediately.
+        self.slide_start = -math.inf
+
+    def ready_for_move(self, now):
+        return now - self.slide_start >= INPUT_THROTTLE_SECONDS
 
     def start_game(self, cells, now):
         self.clear()
@@ -132,15 +143,15 @@ class SaveTracker:
         """Restart the interval without writing: storage already holds this state."""
         self.last_save_time = time.time()
 
-    def save(self, game):
+    def save(self, game, play_seconds):
         started_at = time.perf_counter()
-        serialized = game.encode(bridge.playTime())
+        serialized = game.encode(play_seconds)
         bridge.setState(serialized)
         self.latencies_ms.append((time.perf_counter() - started_at) * 1000)
         self.last_save_time = time.time()
         self.last_state = serialized
 
-    def save_if_due(self, game):
+    def save_if_due(self, game, play_seconds):
         """Interval save, skipped when the snapshot would be byte-identical.
 
         Play time is the only field that moves without a move being made, so once the
@@ -149,10 +160,10 @@ class SaveTracker:
         """
         if time.time() - self.last_save_time < SAVE_INTERVAL_SECONDS:
             return
-        if game.encode(bridge.playTime()) == self.last_state:
+        if game.encode(play_seconds) == self.last_state:
             self.defer()
             return
-        self.save(game)
+        self.save(game, play_seconds)
 
     def refresh_metrics(self):
         now = time.time()
@@ -174,17 +185,12 @@ class SaveTracker:
             weight = position - lower
             return samples[lower] * (1 - weight) + samples[upper] * weight
 
-        self.percentiles = (
-            percentile(0.50),
-            percentile(0.90),
-            percentile(0.99),
-            len(samples),
-        )
+        self.percentiles = (percentile(0.50), percentile(0.90), percentile(0.99))
 
     def summary(self):
         if self.percentiles is None:
             return "collecting"
-        p50, p90, p99, _ = self.percentiles
+        p50, p90, p99 = self.percentiles
         return f"{p50:.0f}/{p90:.0f}/{p99:.0f} ms"
 
 class Hud:
@@ -199,24 +205,29 @@ def start_new_game():
     animations.start_game(spawned, time.perf_counter())
     bridge.setPlayTime(0, False)
     hud.message = "New game. Use arrow keys, WASD, or the buttons."
-    saver.save(game)
+    saver.save(game, 0)
 
 def apply_move(direction):
+    now = time.perf_counter()
+    if not animations.ready_for_move(now):
+        return
+
     result = game.move(direction)
     if result is None:
         return
 
-    animations.start_move(result, time.perf_counter())
+    animations.start_move(result, now)
     # The clock runs from the first move until the board locks, which is exactly
     # "a move just happened and the game is not over".
-    bridge.setPlayTime(bridge.playTime(), not game.game_over)
+    play_seconds = bridge.playTime()
+    bridge.setPlayTime(play_seconds, not game.game_over)
     if result.best_changed:
         save_best_score(game.best)
     if game.game_over:
         hud.message = "No moves left. Press R or New Game."
     else:
         hud.message = ""
-    saver.save(game)
+    saver.save(game, play_seconds)
 
 def load_game_state():
     if not bridge.hasState():
@@ -244,157 +255,109 @@ def viewport():
 
 def window_layout():
     width, height, compact = viewport()
-    margin = 6 if compact else 14
     style = imgui.get_style()
     padding_x, padding_y = vec_xy(style.window_padding)
     _, spacing_y = vec_xy(style.item_spacing)
-    board_gap = 6 if compact else DESKTOP_BOARD_GAP
-    board_margin = 8 if compact else BOARD_MARGIN
-    desired_board_width = DESKTOP_CELL * SIZE + board_gap * (SIZE - 1)
-    available_width = max(1, width - margin * 2)
-    available_height = max(1, height - margin * 2)
+    return compute_layout(width, height, compact, StyleMetrics(
+        padding_x=padding_x,
+        padding_y=padding_y,
+        spacing_y=spacing_y,
+        line_height=imgui.get_text_line_height_with_spacing(),
+        frame_height=imgui.get_frame_height_with_spacing(),
+    ))
 
-    max_board_by_width = max(1, available_width - padding_x * 2 - board_margin * 2)
-    initial_board_width = min(desired_board_width, max_board_by_width)
-    initial_content_width = initial_board_width + board_margin * 2
-
-    line_height = imgui.get_text_line_height_with_spacing()
-    controls_height = CONTROL_BUTTON_SIZE[1] * 2 + spacing_y
-    header_lines = 2 if compact else 1
-
-    def chrome_height(help_lines):
-        """Everything stacked above and below the board, for a given help-line count."""
-        return (
-            padding_y * 2
-            + line_height * header_lines
-            + imgui.get_frame_height_with_spacing()
-            + line_height * help_lines
-            + line_height * 2
-            + controls_height
-            + spacing_y * 4
-            + board_margin * 2
-        )
-
-    def help_lines_for(content_width):
-        return 1 if compact or content_width < 500 else 0
-
-    # Chicken and egg: the board is sized by the height the chrome leaves it, but the
-    # help text wraps to a second line based on the width that board then implies. Size
-    # the board against an estimate from the width-limited board, then recompute the
-    # chrome once the final content width is known.
-    board_width = min(
-        desired_board_width,
-        max_board_by_width,
-        max(1, available_height - chrome_height(help_lines_for(initial_content_width))),
-    )
-    window_width = min(
-        board_width + board_margin * 2 + padding_x * 2,
-        available_width,
-    )
-    content_width = max(1, window_width - padding_x * 2)
-    window_height = min(
-        chrome_height(help_lines_for(content_width)) + board_width,
-        available_height,
-    )
-    x = max(margin, (width - window_width) / 2)
-    y = max(margin, (height - window_height) / 2)
-    return {
-        "margin": margin,
-        "x": x,
-        "y": y,
-        "width": window_width,
-        "height": window_height,
-        "board_width": board_width,
-        "content_width": content_width,
-        "compact": compact,
-    }
-
-# Packed ABGR, the byte order the draw list takes directly.
+# Packed ABGR, the byte order the draw list takes directly. Converted once at import:
+# the alternative is 16 to 32 conversions every frame, each one crossing into C++.
 TILE_TEXT_COLOR = 0xffffffff
 
-def tile_color(value):
-    # Dear ImGui expects normalized RGBA floats.
-    palette = {
-        0:    (0.20, 0.22, 0.27, 1.0),
-        2:    (0.40, 0.48, 0.60, 1.0),
-        4:    (0.32, 0.53, 0.70, 1.0),
-        8:    (0.24, 0.62, 0.72, 1.0),
-        16:   (0.20, 0.68, 0.58, 1.0),
-        32:   (0.44, 0.70, 0.34, 1.0),
-        64:   (0.70, 0.66, 0.25, 1.0),
-        128:  (0.78, 0.53, 0.24, 1.0),
-        256:  (0.78, 0.38, 0.28, 1.0),
-        512:  (0.72, 0.28, 0.42, 1.0),
-        1024: (0.60, 0.30, 0.62, 1.0),
-        2048: (0.45, 0.35, 0.85, 1.0),
-    }
-    return palette.get(value, (0.30, 0.24, 0.55, 1.0))
+def _packed(r, g, b):
+    # Dear ImGui takes normalized RGBA floats; the draw list wants them packed.
+    return imgui.color_convert_float4_to_u32(imgui.ImVec4(r, g, b, 1.0))
+
+# Value 0 is the empty grid cell.
+TILE_COLORS = {
+    0:    _packed(0.20, 0.22, 0.27),
+    2:    _packed(0.40, 0.48, 0.60),
+    4:    _packed(0.32, 0.53, 0.70),
+    8:    _packed(0.24, 0.62, 0.72),
+    16:   _packed(0.20, 0.68, 0.58),
+    32:   _packed(0.44, 0.70, 0.34),
+    64:   _packed(0.70, 0.66, 0.25),
+    128:  _packed(0.78, 0.53, 0.24),
+    256:  _packed(0.78, 0.38, 0.28),
+    512:  _packed(0.72, 0.28, 0.42),
+    1024: _packed(0.60, 0.30, 0.62),
+    2048: _packed(0.45, 0.35, 0.85),
+}
+BEYOND_2048_COLOR = _packed(0.30, 0.24, 0.55)
 
 def vec_xy(value):
     if hasattr(value, "x"):
         return value.x, value.y
     return value[0], value[1]
 
-def text_size(text, font_size):
-    base_width, base_height = vec_xy(imgui.calc_text_size(text))
-    scale = font_size / imgui.get_font_size()
-    return base_width * scale, base_height * scale
+class TilePainter(NamedTuple):
+    """Paints tiles, holding the per-frame imgui handles the tile loops would refetch.
 
-def draw_large_tile_number(value, x, y, size):
-    if not value:
-        return
-
-    text = str(value)
-    if value < 128:
-        font_size = size * 0.50
-    elif value < 1024:
-        font_size = size * 0.43
-    else:
-        font_size = size * 0.36
-    width, height = text_size(text, font_size)
-    imgui.get_window_draw_list().add_text(
-        imgui.get_font(),
-        font_size,
-        (x + (size - width) / 2, y + (size - height) / 2),
-        TILE_TEXT_COLOR,
-        text,
-    )
-
-def board_metrics(target_board_width, compact):
-    gap = 6 if compact else DESKTOP_BOARD_GAP
-    cell = int((target_board_width - gap * (SIZE - 1)) / SIZE)
-    cell = max(36, min(DESKTOP_CELL, cell))
-    return cell, gap
-
-def draw_tile(x, y, size, value):
-    """Draw one tile square at an absolute screen position. value 0 draws a grid cell.
-
-    Tiles are painted rather than laid out: they overlap, move between cells, and
-    scale independently of the grid, none of which a widget would agree to do. The
-    board reserves its space once, with the dummy at the end of draw_board.
+    Tiles are painted rather than laid out: they overlap, move between cells, and scale
+    independently of the grid, none of which a widget would agree to do. The board
+    reserves its space once, with the dummy at the end of draw_board.
     """
-    imgui.get_window_draw_list().add_rect_filled(
-        (x, y),
-        (x + size, y + size),
-        imgui.color_convert_float4_to_u32(imgui.ImVec4(*tile_color(value))),
-        imgui.get_style().frame_rounding,
-    )
-    draw_large_tile_number(value, x, y, size)
+
+    draw_list: object
+    font: object
+    base_font_size: float
+    rounding: float
+
+    def tile(self, x, y, size, value):
+        """Draw one tile square at an absolute screen position. value 0 is a grid cell."""
+        self.draw_list.add_rect_filled(
+            (x, y),
+            (x + size, y + size),
+            TILE_COLORS.get(value, BEYOND_2048_COLOR),
+            self.rounding,
+        )
+        if value:
+            self.number(value, x, y, size)
+
+    def number(self, value, x, y, size):
+        text = str(value)
+        if value < 128:
+            font_size = size * 0.50
+        elif value < 1024:
+            font_size = size * 0.43
+        else:
+            font_size = size * 0.36
+        base_width, base_height = vec_xy(imgui.calc_text_size(text))
+        scale = font_size / self.base_font_size
+        width, height = base_width * scale, base_height * scale
+        self.draw_list.add_text(
+            self.font,
+            font_size,
+            (x + (size - width) / 2, y + (size - height) / 2),
+            TILE_TEXT_COLOR,
+            text,
+        )
 
 def draw_board(layout):
-    cell, gap = board_metrics(layout["board_width"], layout["compact"])
+    cell, gap = layout.cell, layout.gap
     available_width, _ = vec_xy(imgui.get_content_region_avail())
-    board_width = cell * SIZE + gap * (SIZE - 1)
-    indent = max(0, (available_width - board_width) / 2)
+    indent = max(0, (available_width - layout.board_width) / 2)
     now = time.perf_counter()
 
     imgui.indent(indent)
     origin_x, origin_y = vec_xy(imgui.get_cursor_screen_pos())
+    painter = TilePainter(
+        draw_list=imgui.get_window_draw_list(),
+        font=imgui.get_font(),
+        base_font_size=imgui.get_font_size(),
+        rounding=imgui.get_style().frame_rounding,
+    )
 
     # Background grid stays static and full-size; animated tiles draw on top of it.
     for r in range(SIZE):
         for c in range(SIZE):
-            draw_tile(
+            painter.tile(
                 origin_x + c * (cell + gap),
                 origin_y + r * (cell + gap),
                 cell,
@@ -411,7 +374,7 @@ def draw_board(layout):
             to_r, to_c = destination
             r = from_r + (to_r - from_r) * progress
             c = from_c + (to_c - from_c) * progress
-            draw_tile(
+            painter.tile(
                 origin_x + c * (cell + gap),
                 origin_y + r * (cell + gap),
                 cell,
@@ -427,7 +390,7 @@ def draw_board(layout):
                 if tile_size < 1:
                     continue
                 offset = (cell - tile_size) / 2
-                draw_tile(
+                painter.tile(
                     origin_x + c * (cell + gap) + offset,
                     origin_y + r * (cell + gap) + offset,
                     tile_size,
@@ -435,7 +398,7 @@ def draw_board(layout):
                 )
 
     imgui.set_cursor_screen_pos((origin_x, origin_y))
-    imgui.dummy((board_width, board_width))
+    imgui.dummy((layout.board_width, layout.board_width))
     imgui.unindent(indent)
 
 def controls():
@@ -465,12 +428,14 @@ def controls():
 
 def gui():
     process_keyboard()
-    saver.save_if_due(game)
+    # One crossing per frame: every reader below wants the same instant anyway.
+    play_seconds = float(bridge.playTime())
+    saver.save_if_due(game, play_seconds)
     saver.refresh_metrics()
 
     layout = window_layout()
-    imgui.set_next_window_pos((layout["x"], layout["y"]), imgui.Cond_.always)
-    imgui.set_next_window_size((layout["width"], layout["height"]), imgui.Cond_.always)
+    imgui.set_next_window_pos((layout.x, layout.y), imgui.Cond_.always)
+    imgui.set_next_window_size((layout.width, layout.height), imgui.Cond_.always)
     imgui.begin("2048 in Python / Dear ImGui / WebAssembly", None, WINDOW_FLAGS)
 
     imgui.text(
@@ -484,13 +449,10 @@ def gui():
     imgui.same_line()
     if imgui.button("Share"):
         hud.share_pending = True
-    if not layout["compact"] and layout["content_width"] >= 500:
-        imgui.same_line()
-        imgui.text("Keyboard: arrows/WASD, swipe, R to restart")
-    elif not layout["compact"]:
-        imgui.text_wrapped("Keyboard: arrows/WASD, swipe, R to restart")
-    else:
+    if layout.help_placement == COMPACT_HELP:
         imgui.text("Swipe to move. R restarts.")
+    else:
+        imgui.text_wrapped("Keyboard: arrows/WASD, swipe, R to restart")
 
     imgui.separator()
     _, body_top = vec_xy(imgui.get_cursor_screen_pos())
@@ -501,7 +463,7 @@ def gui():
 
     imgui.text(
         f"FPS: {hello_imgui.frame_rate():.0f}"
-        f" | Play time: {float(bridge.playTime()):.0f}s"
+        f" | Play time: {play_seconds:.0f}s"
         f" | Save p50/90/99: {saver.summary()}"
     )
     _, body_bottom = vec_xy(imgui.get_item_rect_max())
@@ -513,7 +475,7 @@ def gui():
     if hud.share_pending:
         hud.share_pending = False
         window_x, _ = vec_xy(imgui.get_window_pos())
-        content_width = layout["content_width"]
+        content_width = layout.content_width
         # Still a JSON string: this crosses once per Share click, not per frame, and a
         # nested payload is cheaper to hand over as text than to convert field by field.
         bridge.share(json.dumps({
@@ -562,13 +524,16 @@ def start():
         start_new_game()
     return True
 
-bridge.setInputThrottleMs(INPUT_THROTTLE_MS)
 game = Game(best=load_best_score())
 animations = TileAnimations()
 saver = SaveTracker()
 hud = Hud()
 
 if start():
+    # Only now is there a game to receive input: keys pressed while Pyodide loaded are
+    # dropped rather than queued up to fire all at once on the first frame, and a
+    # corrupt save leaves input off while the recovery overlay is up.
+    bridge.setAcceptingInput(True)
     immapp.run(
         gui,
         window_title="2048 with imgui-bundle + Pyodide",

@@ -118,7 +118,9 @@
     const statusEl = document.getElementById("status");
     const overlayEl = document.getElementById("overlay");
     const canvas = document.getElementById("canvas");
-    const PYTHON_MODULES = ["board.py", "game.py"];
+    // game.py is the entry point and imports the rest, so every module it reaches has
+    // to be listed here: Pyodide's filesystem has only what this loop writes into it.
+    const PYTHON_MODULES = ["board.py", "layout.py", "game.py"];
 
     // The WebGL drawing buffer is only readable until the browser composites it, so a
     // screenshot has to be taken inside the frame that drew it. imgui-bundle drives its
@@ -170,30 +172,24 @@
     resizeCanvasToDisplaySize();
 
     const queuedInput = [];
-    // Set from Python at startup: the throttle exists so a held key cannot start a
-    // move before the previous slide has landed, which makes it a property of the
-    // animation, and the animation is Python's. Until it arrives there is no game to
-    // receive input, so keys pressed while Pyodide loads are dropped rather than
-    // queued up to fire all at once on the first frame.
-    let inputThrottleMs = null;
-    let lastAcceptedInputTime = 0;
+    // Flipped on by Python once the game exists. Rate limiting is Python's job, not
+    // this listener's: the on-screen buttons are imgui widgets that never reach this
+    // file, so a throttle here would only cover half the ways a move can start.
+    let acceptingInput = false;
 
     function queueInput(input) {
-      if (inputThrottleMs === null) {
-        return;
+      if (acceptingInput) {
+        queuedInput.push(input);
       }
-      const now = performance.now();
-      if (now - lastAcceptedInputTime < inputThrottleMs) {
-        return;
-      }
-      lastAcceptedInputTime = now;
-      queuedInput.push(input);
     }
 
     const compactMedia = window.matchMedia(
       document.getElementById("mobile-stylesheet").media
     );
     const bestScoreKey = "imgui-2048.bestScore";
+    // The ".v1" is frozen history, not the current format: versioning moved into the
+    // payload (board.STATE_VERSION), which is what migrations read. Renaming the key
+    // would strand every saved game, so it stays.
     const gameStateKey = "imgui-2048.gameState.v1";
 
     let playTimeSeconds = 0;
@@ -382,11 +378,8 @@
     // viewport, play time -- returns plain values or a plain object so Pyodide hands
     // Python something it can read directly instead of a JSON string to parse.
     window.game2048 = {
-      setInputThrottleMs(milliseconds) {
-        if (!Number.isFinite(milliseconds) || milliseconds < 0) {
-          throw new Error(`Invalid 2048 input throttle: ${milliseconds}`);
-        }
-        inputThrottleMs = milliseconds;
+      setAcceptingInput(accepting) {
+        acceptingInput = Boolean(accepting);
       },
 
       popInput() {
