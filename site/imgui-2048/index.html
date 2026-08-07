@@ -122,6 +122,12 @@
     // to be listed here: Pyodide's filesystem has only what this loop writes into it.
     const PYTHON_MODULES = ["board.py", "layout.py", "game.py"];
 
+    // Every frame the game draws passes through the wrapper below, which makes it the one
+    // place that can answer "is it still drawing?" -- the question the freeze watchdog
+    // further down exists to ask.
+    let framesStarted = false;
+    let lastFrameAt = 0;
+
     // The WebGL drawing buffer is only readable until the browser composites it, so a
     // screenshot has to be taken inside the frame that drew it. imgui-bundle drives its
     // main loop from requestAnimationFrame, so wrapping rAF here -- before Pyodide loads
@@ -130,6 +136,10 @@
     let pendingCapture = null;
     const originalRequestAnimationFrame = window.requestAnimationFrame.bind(window);
     window.requestAnimationFrame = (callback) => originalRequestAnimationFrame((time) => {
+      // Stamped before the callback rather than after, so a frame that throws still
+      // counts as the last one seen and the watchdog starts its clock from here.
+      framesStarted = true;
+      lastFrameAt = performance.now();
       callback(time);
       if (pendingCapture === null) {
         return;
@@ -155,6 +165,29 @@
     function clearStatus() {
       statusEl.textContent = "";
       statusEl.hidden = true;
+    }
+
+    function element(tag, text) {
+      const node = document.createElement(tag);
+      node.textContent = text;
+      return node;
+    }
+
+    // The overlay is the only part of the page that outlives the canvas, so every dead
+    // end is announced through here with the one action that clears it. Built from nodes
+    // rather than innerHTML because the detail lines carry error text.
+    function showRecovery(heading, details, actionLabel, action) {
+      const nodes = [element("strong", heading)];
+      for (const detail of details) {
+        nodes.push(document.createElement("br"), element("small", detail));
+      }
+      const button = element("button", actionLabel);
+      button.addEventListener("click", action);
+      nodes.push(document.createElement("br"), button);
+
+      overlayEl.replaceChildren(...nodes);
+      overlayEl.classList.add("actionable");
+      overlayEl.style.display = "";
     }
 
     function resizeCanvasToDisplaySize() {
@@ -286,6 +319,65 @@
     }, { passive: false });
 
     canvas.addEventListener("touchcancel", resetTouchStart);
+
+    // A frozen game is the failure this page could not otherwise report: the canvas holds
+    // its last image, the page around it keeps responding, and nothing reloads on its own,
+    // so the only signal the user gets is a board that no longer moves. Both known causes
+    // -- the browser dropping the WebGL context, and an exception escaping the frame
+    // callback, after which Emscripten schedules no further frames -- end up here, as does
+    // any other stall the watchdog notices.
+    let stopped = false;
+
+    function stopGame(reason) {
+      if (stopped) {
+        return;
+      }
+      stopped = true;
+      acceptingInput = false;
+      showRecovery(
+        "The game stopped drawing.",
+        [
+          reason,
+          "Reloading picks the board back up: it is written to storage after every move.",
+        ],
+        "Reload",
+        () => location.reload()
+      );
+      log(`Stopped: ${reason}`);
+    }
+
+    // iOS Safari reclaims WebGL contexts from tabs left in the background, which is what a
+    // game that was fine hours ago and is frozen on return has most likely hit.
+    // preventDefault is what lets the browser offer a restore at all; the offer goes
+    // unused, because Dear ImGui's backend has no hook for rebuilding its textures and
+    // buffers, and Emscripten keeps issuing draw calls into the dead context either way.
+    canvas.addEventListener("webglcontextlost", (event) => {
+      event.preventDefault();
+      stopGame(
+        "The browser released the WebGL context, which iOS Safari does to tabs left in the background."
+      );
+    }, { passive: false });
+
+    // Timers keep running when requestAnimationFrame does not, which is the whole reason a
+    // stalled frame loop can be caught from inside the page. Hidden tabs stop drawing by
+    // design, so they are not stalls, and returning to one restarts the clock: the first
+    // frame back can take a moment.
+    const FRAME_STALL_MS = 4000;
+
+    setInterval(() => {
+      if (stopped || !framesStarted || document.visibilityState !== "visible") {
+        return;
+      }
+      if (performance.now() - lastFrameAt > FRAME_STALL_MS) {
+        stopGame("No frame has been drawn for several seconds.");
+      }
+    }, 1000);
+
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible") {
+        lastFrameAt = performance.now();
+      }
+    });
 
     const samplerCanvas = document.createElement("canvas");
     samplerCanvas.width = 1;
@@ -465,35 +557,34 @@
       // offer the one action that clears it, rather than discarding the save
       // silently or leaving the page stuck on "Startup failed".
       reportCorruptState(reason) {
-        const heading = document.createElement("strong");
-        heading.textContent = "Saved game was corrupt.";
-        const detail = document.createElement("small");
-        detail.textContent = String(reason);
-        const consequence = document.createElement("small");
-        consequence.textContent =
-          "Starting fresh discards the saved game and the best score.";
-        const button = document.createElement("button");
-        button.textContent = "Start fresh";
-        button.addEventListener("click", () => {
-          // Both keys: the saved score is validated against the best score, so
-          // clearing one and keeping the other is how this state is reached.
-          localStorage.removeItem(gameStateKey);
-          localStorage.removeItem(bestScoreKey);
-          location.reload();
-        });
-
-        overlayEl.replaceChildren(
-          heading,
-          document.createElement("br"),
-          detail,
-          document.createElement("br"),
-          consequence,
-          document.createElement("br"),
-          button
+        showRecovery(
+          "Saved game was corrupt.",
+          [
+            String(reason),
+            "Starting fresh discards the saved game and the best score.",
+          ],
+          "Start fresh",
+          () => {
+            // Both keys: the saved score is validated against the best score, so
+            // clearing one and keeping the other is how this state is reached.
+            localStorage.removeItem(gameStateKey);
+            localStorage.removeItem(bestScoreKey);
+            location.reload();
+          }
         );
-        overlayEl.classList.add("actionable");
-        overlayEl.style.display = "";
         log(`Saved game was corrupt: ${reason}`);
+      },
+
+      // Raised by a frame that failed. Emscripten will not schedule another one after an
+      // iteration throws, so the game is already over by the time this runs -- the point
+      // is to say so, and to name the error, instead of leaving a canvas that has quietly
+      // stopped updating. The traceback goes to the console; the overlay gets its last
+      // line, which is the exception itself.
+      reportFrameError(traceback) {
+        const text = String(traceback);
+        console.error(text);
+        const lines = text.trimEnd().split("\n");
+        stopGame(lines[lines.length - 1] || "The game hit an error while drawing.");
       }
     };
 

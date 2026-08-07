@@ -1,9 +1,11 @@
 import json
 import math
 import time
+import traceback
 from collections import deque
 from typing import NamedTuple
 from js import window
+from pyodide.ffi import JsException
 from imgui_bundle import imgui, immapp, hello_imgui
 
 from board import SIZE, Game, decode_saved_state
@@ -44,10 +46,28 @@ def load_best_score():
         raise ValueError(f"Invalid stored 2048 best score: {value}")
     return value
 
+def store(write):
+    """Run a storage write, reporting a refusal rather than raising. True if it landed.
+
+    Writes are the one part of a frame that fails for reasons outside this page's
+    control: localStorage raises QuotaExceededError once the origin's allowance is gone,
+    which is something a tab left open for hours can walk into. Raising here would reach
+    the frame loop and end the game (see run_frame), and a lost save is the smaller loss
+    by a wide margin -- so the failure is shown in the status line and the next interval
+    save retries.
+    """
+    try:
+        write()
+    except JsException as error:
+        hud.storage_error = str(error)
+        return False
+    hud.storage_error = None
+    return True
+
 def save_best_score(value):
     if value < 0:
         raise ValueError(f"Invalid 2048 best score: {value}")
-    bridge.setBestScore(int(value))
+    store(lambda: bridge.setBestScore(int(value)))
 
 def ease_out_cubic(t):
     return 1 - (1 - t) ** 3
@@ -146,9 +166,12 @@ class SaveTracker:
     def save(self, game, play_seconds):
         started_at = time.perf_counter()
         serialized = game.encode(play_seconds)
-        bridge.setState(serialized)
-        self.latencies_ms.append((time.perf_counter() - started_at) * 1000)
         self.last_save_time = time.time()
+        if not store(lambda: bridge.setState(serialized)):
+            # last_state is deliberately left alone: the snapshot never reached storage,
+            # so the next interval save has to see it as still pending.
+            return
+        self.latencies_ms.append((time.perf_counter() - started_at) * 1000)
         self.last_state = serialized
 
     def save_if_due(self, game, play_seconds):
@@ -199,6 +222,19 @@ class Hud:
     def __init__(self):
         self.message = "Join matching tiles to reach 2048."
         self.share_pending = False
+        # Set by store() when the browser refuses a write, cleared when one lands.
+        self.storage_error = None
+
+    def status(self):
+        """What the message line says. A failing save outranks anything else on it.
+
+        The layout reserves one line here, so the warning takes the line over rather than
+        adding one: a game that has quietly stopped recording progress matters more than
+        the message it displaces, and the board still shows what the board is doing.
+        """
+        if self.storage_error is None:
+            return self.message
+        return "Not saving: the browser refused to write to storage."
 
 def start_new_game():
     spawned = game.reset()
@@ -459,7 +495,7 @@ def gui():
     draw_board(layout)
     imgui.separator()
 
-    imgui.text(hud.message)
+    imgui.text(hud.status())
 
     imgui.text(
         f"FPS: {hello_imgui.frame_rate():.0f}"
@@ -503,6 +539,26 @@ def gui():
 
     imgui.end()
 
+def run_frame():
+    """Draw one frame. Nothing may escape this, or the game stops for good.
+
+    imgui-bundle's Pyodide runner re-raises out of the main loop, and Emscripten stops
+    scheduling frames once an iteration throws. What is left is a page that still
+    responds, a canvas frozen on its last image, and no way back except a manual reload
+    -- the freeze, in other words. Report the failure through the page instead, and stop
+    drawing: an unbalanced imgui window stack could otherwise take the next frame down
+    with it, and there is nothing useful left to draw anyway.
+    """
+    global frame_failed
+    if frame_failed:
+        return
+    try:
+        gui()
+    except Exception:  # Anything at all: the alternative is a silent, permanent freeze.
+        frame_failed = True
+        bridge.setAcceptingInput(False)
+        bridge.reportFrameError(traceback.format_exc())
+
 def start():
     """Restore or begin a game. False means startup stalled on a corrupt save."""
     try:
@@ -528,6 +584,7 @@ game = Game(best=load_best_score())
 animations = TileAnimations()
 saver = SaveTracker()
 hud = Hud()
+frame_failed = False
 
 if start():
     # Only now is there a game to receive input: keys pressed while Pyodide loaded are
@@ -535,7 +592,7 @@ if start():
     # corrupt save leaves input off while the recovery overlay is up.
     bridge.setAcceptingInput(True)
     immapp.run(
-        gui,
+        run_frame,
         window_title="2048 with imgui-bundle + Pyodide",
         window_size=(720, 760),
         fps_idle=0,
