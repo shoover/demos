@@ -322,11 +322,29 @@
 
     // A frozen game is the failure this page could not otherwise report: the canvas holds
     // its last image, the page around it keeps responding, and nothing reloads on its own,
-    // so the only signal the user gets is a board that no longer moves. Both known causes
-    // -- the browser dropping the WebGL context, and an exception escaping the frame
-    // callback, after which Emscripten schedules no further frames -- end up here, as does
-    // any other stall the watchdog notices.
+    // so the only signal the user gets is a board that no longer moves.
+    //
+    // The two look different, which is worth knowing when one is reported. A lost WebGL
+    // context blanks the canvas. A frame loop that stopped being scheduled leaves the last
+    // frame perfectly intact, down to a frozen FPS counter -- and Emscripten stops
+    // scheduling after any single iteration throws, or aborts, which a wasm-level assert
+    // does without ever raising a Python exception. Everything ends up here either way.
     let stopped = false;
+
+    // The console is out of reach on the phone this actually happens on, and whatever
+    // ended the frame loop is logged there seconds before the freeze becomes noticeable.
+    // Keeping the last one lets the stall report name it on screen instead. A wasm abort
+    // -- an ImGui assert, say -- also arrives here rather than as a Python exception,
+    // which is the case run_frame cannot catch.
+    let lastError = null;
+
+    window.addEventListener("error", (event) => {
+      lastError = event.message || String(event.error);
+    });
+
+    window.addEventListener("unhandledrejection", (event) => {
+      lastError = `Unhandled rejection: ${event.reason}`;
+    });
 
     function stopGame(reason) {
       if (stopped) {
@@ -359,25 +377,54 @@
     }, { passive: false });
 
     // Timers keep running when requestAnimationFrame does not, which is the whole reason a
-    // stalled frame loop can be caught from inside the page. Hidden tabs stop drawing by
-    // design, so they are not stalls, and returning to one restarts the clock: the first
-    // frame back can take a moment.
+    // stalled frame loop can be caught from inside the page.
     const FRAME_STALL_MS = 4000;
+    let lastCheckAt = performance.now();
+
+    // Everything the page can still see about a stall, since whoever hits it is holding a
+    // phone with no console attached: how long it has been, whether the canvas lost its
+    // context, and whatever error landed just before.
+    function stallReport(idleMs) {
+      const gl = canvas.getContext("webgl2") || canvas.getContext("webgl");
+      const parts = [`No frame has been drawn in ${Math.round(idleMs / 1000)}s.`];
+      if (gl && gl.isContextLost()) {
+        parts.push("The WebGL context is lost.");
+      }
+      if (lastError) {
+        parts.push(`Last error: ${lastError}`);
+      }
+      return parts.join(" ");
+    }
 
     setInterval(() => {
-      if (stopped || !framesStarted || document.visibilityState !== "visible") {
+      const now = performance.now();
+      const sinceCheck = now - lastCheckAt;
+      lastCheckAt = now;
+
+      if (stopped || !framesStarted) {
         return;
       }
-      if (performance.now() - lastFrameAt > FRAME_STALL_MS) {
-        stopGame("No frame has been drawn for several seconds.");
+      // A hidden tab is not drawing because it was told not to, so the gap it opens up is
+      // not a stall and the baseline moves with it.
+      if (document.visibilityState !== "visible") {
+        lastFrameAt = now;
+        return;
+      }
+      // This timer was suspended along with the rest of the page -- which is what being
+      // backgrounded for hours looks like from in here. The frame loop deserves the same
+      // grace period a fresh start would get before being called dead, and relying on
+      // visibilitychange alone would not give it: Safari does not always fire one on the
+      // way back, which would turn every return into a false alarm.
+      if (sinceCheck > FRAME_STALL_MS) {
+        lastFrameAt = now;
+        return;
+      }
+
+      const idle = now - lastFrameAt;
+      if (idle > FRAME_STALL_MS) {
+        stopGame(stallReport(idle));
       }
     }, 1000);
-
-    document.addEventListener("visibilitychange", () => {
-      if (document.visibilityState === "visible") {
-        lastFrameAt = performance.now();
-      }
-    });
 
     const samplerCanvas = document.createElement("canvas");
     samplerCanvas.width = 1;
