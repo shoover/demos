@@ -624,45 +624,6 @@ window.addEventListener("keydown", (event) => {
   }
 }, { passive: false });
 
-/*
- * Pinch zoom cannot be refused with touch-action on iOS. WebKit implements the
- * property for panning and for double-tap zoom, but deliberately keeps the pinch
- * available whatever a page asks of it, so `touch-action: none` on the pad did not
- * stop a two-thumb press from zooming the page -- and could not have.
- *
- * What WebKit does allow is cancelling its own gesture events. So cancel exactly the
- * pinches that have a finger on the d-pad, which is the accident this layout invites,
- * and leave every other pinch alone: zooming the board stays something the player can
- * do, and undo.
- */
-const padTouches = new Set();
-
-document.addEventListener("touchstart", (event) => {
-  for (const touch of event.changedTouches) {
-    if (touch.target instanceof Element && touch.target.closest("#dpad")) {
-      padTouches.add(touch.identifier);
-    }
-  }
-}, { passive: true, capture: true });
-
-const forgetPadTouches = (event) => {
-  for (const touch of event.changedTouches) {
-    padTouches.delete(touch.identifier);
-  }
-};
-
-document.addEventListener("touchend", forgetPadTouches, { passive: true, capture: true });
-document.addEventListener("touchcancel", forgetPadTouches, { passive: true, capture: true });
-
-// Safari only, and non-passive, since the point is to refuse the default.
-for (const type of ["gesturestart", "gesturechange"]) {
-  document.addEventListener(type, (event) => {
-    if (padTouches.size > 0) {
-      event.preventDefault();
-    }
-  }, { passive: false });
-}
-
 let touchStart = null;
 
 elements.main.addEventListener("touchstart", (event) => {
@@ -700,7 +661,19 @@ elements.main.addEventListener("touchcancel", () => {
 });
 
 for (const direction of ["up", "down", "left", "right"]) {
-  document.getElementById(direction).addEventListener("click", () => applyMove(direction));
+  const button = document.getElementById(direction);
+  // Mouse and keyboard.
+  button.addEventListener("click", () => applyMove(direction));
+  // Touch, which cannot be left to the click the browser would synthesise. Tapping
+  // one arrow twice in a row is ordinary play and iOS reads it as a double tap, then
+  // zooms the page to fit the pad -- 274px of it, which is the 1.6x that kept
+  // happening. `touch-action` does not stop that on WebKit whatever it is set to, but
+  // refusing the touch's own default does, and refusing it also cancels the click, so
+  // the move has to be applied from here.
+  button.addEventListener("touchend", (event) => {
+    event.preventDefault();
+    applyMove(direction);
+  }, { passive: false });
 }
 document.getElementById("new-game").addEventListener("click", startNewGame);
 document.getElementById("share").addEventListener("click", () => {

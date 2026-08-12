@@ -258,11 +258,9 @@
     /* The arrows are button labels drawn at the panel's text size, as imgui draws
        them; only the 74x60 hit area is oversized.
 
-       These are the one place a pinch is refused. The two clusters are meant to be
-       played with a thumb on each, and two thumbs landing together is a pinch as far
-       as the browser is concerned -- which is how a game of 2048 kept ending up zoomed
-       in. Everywhere else on the page a pinch still works, so a zoom is always
-       something the player can undo. */
+       `none` here is for the browsers that honour it, where it keeps a double tap on
+       an arrow -- two ordinary moves in a row -- from being read as a zoom. WebKit
+       ignores it for that, so game.js refuses the touch's default as well. */
     #dpad button {
       width: 74px;
       height: 60px;
