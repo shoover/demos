@@ -1,0 +1,336 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>2048 in vanilla JavaScript</title>
+  <style>
+    /* The face Dear ImGui renders the other demo's window with, down to the tile
+       numbers: HelloImGui ships DroidSans.ttf as its default UI font. No desktop or
+       phone has it installed, so leaving it to a font stack meant every visitor saw
+       the local UI face instead. 15 KB subset; see the .LICENSE.txt beside it. */
+    @font-face {
+      font-family: "Droid Sans";
+      src: url("./droid-sans-latin.woff2") format("woff2");
+      font-weight: 400;
+      font-style: normal;
+      font-display: swap;
+    }
+
+    :root {
+      color-scheme: dark;
+
+      /* Two faces, split the way the other demo splits: the page around the game is
+         DOM in both, and is styled here exactly as it is over there, while the panel
+         stands in for the canvas and takes imgui's font. */
+      --page-font: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+        "Segoe UI", sans-serif;
+      --panel-font: "Droid Sans", var(--page-font);
+      --ui-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+      font-family: var(--page-font);
+      background: #0f1117;
+      color: #e6edf3;
+
+      /* Painted by the script on every resize; every board dimension derives from them. */
+      --cell: 92px;
+      --gap: 8px;
+    }
+
+    html, body {
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      overflow: hidden;
+    }
+
+    /* Ground, ink and face are all set here rather than left to inherit from :root.
+       This page is also published as an Artifact, which wraps it in a host document
+       whose reset styles `body` -- `color:#141413` for a light viewer -- and a rule on
+       body beats anything inherited from html. Inheriting cost every label in the page
+       its colour and left near-black text on a near-black panel. */
+    body {
+      display: grid;
+      background: #0f1117;
+      color: #e6edf3;
+      font-family: var(--page-font);
+      grid-template-rows: auto 1fr;
+      /* Not `auto`: an auto column is sized by the panel, which would let a board that
+         does not fit push the play area wider than the viewport it is measured against. */
+      grid-template-columns: minmax(0, 1fr);
+    }
+
+    header {
+      padding: 12px 16px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+      background: linear-gradient(180deg, rgba(255,255,255,0.06), rgba(255,255,255,0.02));
+    }
+
+    h1 {
+      margin: 0 0 4px;
+      font-size: 16px;
+      font-weight: 650;
+    }
+
+    #status {
+      font-family: var(--ui-mono);
+      font-size: 12px;
+      color: #9fb3c8;
+      white-space: pre-wrap;
+    }
+
+    #status:empty { display: none; }
+
+    main {
+      position: relative;
+      display: grid;
+      place-items: center;
+      min-height: 0;
+      padding: 14px;
+      overflow: hidden;
+      background: #12151f;
+      touch-action: none;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+
+    /* The panel stands in for the imgui window: its font, its neutral grey against the
+       page's near-black, fixed padding, 4px item spacing, and a board that takes
+       whatever vertical room the rest of the stack leaves over. No drop shadow --
+       imgui's window does not cast one. */
+    #panel {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      max-width: 100%;
+      padding: 8px;
+      border: 1px solid rgba(255, 255, 255, 0.14);
+      border-radius: 6px;
+      background: #262626;
+      color: #fff;
+      font-family: var(--panel-font);
+      font-size: 14px;
+    }
+
+    #panel p {
+      margin: 0;
+      min-height: 1.35em;
+      line-height: 1.35;
+      white-space: pre-wrap;
+    }
+
+    /* No secondary text scale or colour inside the panel: imgui draws every line of
+       that window in one size and one colour, help and stats included. Only the page
+       header, which the other demo styles with this same stylesheet, is set apart. */
+
+    hr {
+      width: 100%;
+      height: 1px;
+      margin: 4px 0;
+      border: 0;
+      background: rgba(255, 255, 255, 0.14);
+    }
+
+    /* Sized like an imgui frame -- its 4x3 frame padding, minus the border -- rather
+       than like a web button, so New Game and Share sit as tight to their labels as
+       they do in the other demo. */
+    button {
+      padding: 3px 6px;
+      border: 1px solid rgba(255, 255, 255, 0.18);
+      border-radius: 6px;
+      background: #343434;
+      color: inherit;
+      font: inherit;
+      line-height: 1.2;
+      cursor: pointer;
+      touch-action: manipulation;
+    }
+
+    button:hover { background: #3f3f3f; }
+    /* imgui fills a held button with the theme's accent rather than a lighter grey. */
+    button:active { background: #4b6eaf; }
+    button:focus-visible { outline: 2px solid #6f8fd0; outline-offset: 2px; }
+
+    #actions {
+      display: flex;
+      gap: 8px;
+    }
+
+    /* Board ---------------------------------------------------------------- */
+
+    #board-wrap {
+      display: grid;
+      place-items: center;
+      flex: 1;
+      min-height: 0;
+      margin: 6px 0;
+      overflow: hidden;
+    }
+
+    #board {
+      position: relative;
+      width: calc(var(--cell) * 4 + var(--gap) * 3);
+      height: calc(var(--cell) * 4 + var(--gap) * 3);
+    }
+
+    #grid {
+      display: grid;
+      grid-template-columns: repeat(4, var(--cell));
+      gap: var(--gap);
+    }
+
+    .cell, .tile-face {
+      width: var(--cell);
+      height: var(--cell);
+      border-radius: 6px;
+      background: #333845;
+    }
+
+    #tiles {
+      position: absolute;
+      inset: 0;
+    }
+
+    /* Tiles are painted rather than laid out: they overlap, move between cells, and
+       scale independently of the grid. The outer element carries the slide the script
+       animates, the face carries the pop, so the two never fight over one transform. */
+    .tile {
+      position: absolute;
+      top: 0;
+      left: 0;
+    }
+
+    /* Regular weight, like the numbers imgui scales up out of its own font atlas. */
+    .tile-face {
+      display: grid;
+      place-items: center;
+      color: #fff;
+      font-variant-numeric: tabular-nums;
+      line-height: 1;
+    }
+
+    /* The spawn and merge bursts are scaled by the frame loop, next to the slide, for
+       the same reason the slide is: an embedder that overrides CSS animation, or a
+       browser that decides not to run one, took the whole effect with it. All three
+       are transforms on a tile that is already in place -- nothing flashes, nothing
+       moves at the page level -- so they run for everyone, as they do in the canvas
+       demo this mirrors. */
+
+    .v2 { background: #667a99; }
+    .v4 { background: #5287b3; }
+    .v8 { background: #3d9eb8; }
+    .v16 { background: #33ad94; }
+    .v32 { background: #70b357; }
+    .v64 { background: #b3a840; }
+    .v128 { background: #c7873d; }
+    .v256 { background: #c76147; }
+    .v512 { background: #b8476b; }
+    .v1024 { background: #994d9e; }
+    .v2048 { background: #7359d9; }
+    .beyond { background: #4d3d8c; }
+
+    /* D-pad ---------------------------------------------------------------- */
+
+    /* Two thumb clusters, not a cross: left/right sit under the left thumb and
+       up/down stack under the right one, separated by a 36px channel -- 44px here,
+       since the channel is on top of the 8px the buttons are spaced by. */
+    #dpad {
+      display: flex;
+      gap: 44px;
+      align-items: flex-end;
+      justify-content: center;
+      margin-top: 4px;
+    }
+
+    .pad-pair, .pad-stack {
+      display: flex;
+      gap: 8px;
+    }
+
+    .pad-stack { flex-direction: column; }
+
+    /* The arrows are button labels drawn at the panel's text size, as imgui draws
+       them; only the 74x60 hit area is oversized. */
+    #dpad button {
+      width: 74px;
+      height: 60px;
+    }
+
+    /* Overlay -------------------------------------------------------------- */
+
+    #overlay {
+      position: absolute;
+      inset: 14px auto auto 14px;
+      max-width: min(620px, calc(100% - 28px));
+      padding: 10px 12px;
+      border: 1px solid rgba(255, 255, 255, 0.14);
+      border-radius: 10px;
+      background: rgba(15, 17, 23, 0.88);
+      box-shadow: 0 8px 28px rgba(0, 0, 0, 0.32);
+      backdrop-filter: blur(10px);
+      font-size: 13px;
+      line-height: 1.4;
+    }
+
+    #overlay[hidden] { display: none; }
+    #overlay strong { color: #fff; }
+    #overlay small { color: #9fb3c8; }
+    #overlay button { margin-top: 10px; }
+  </style>
+  <!-- This media query is the single source for the compact breakpoint: the script
+       reads it back off the element rather than repeating the pixel count. -->
+  <style id="compact-styles" media="(max-width: 700px)">
+    header { padding: 8px 10px; }
+    h1 { font-size: 14px; }
+    #status { font-size: 11px; line-height: 1.35; }
+    main { padding: 6px; }
+    #panel { font-size: 13px; }
+    #board-wrap { margin: 2px 0; }
+    #overlay { inset: 8px; max-width: calc(100% - 16px); padding: 8px 10px; border-radius: 8px; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>2048 in vanilla JavaScript</h1>
+    <div id="status"></div>
+  </header>
+
+  <main>
+    <section id="panel">
+      <p id="score">Score: 0  |  Moves: 0  |  Best: 0</p>
+      <div id="actions">
+        <button id="new-game" type="button">New Game</button>
+        <button id="share" type="button">Share</button>
+      </div>
+      <p id="help">Keyboard: arrows/WASD, swipe, R to restart</p>
+
+      <hr />
+      <div id="board-wrap">
+        <div id="board">
+          <div id="grid"></div>
+          <div id="tiles"></div>
+        </div>
+      </div>
+      <hr />
+
+      <p id="message">Join matching tiles to reach 2048.</p>
+      <p id="stats">FPS: 0 | Play time: 0s | Save p50/90/99: collecting</p>
+
+      <div id="dpad">
+        <div class="pad-pair">
+          <button id="left" type="button" aria-label="Left">&lt;</button>
+          <button id="right" type="button" aria-label="Right">&gt;</button>
+        </div>
+        <div class="pad-stack">
+          <button id="up" type="button" aria-label="Up">^</button>
+          <button id="down" type="button" aria-label="Down">v</button>
+        </div>
+      </div>
+    </section>
+
+    <div id="overlay" hidden></div>
+  </main>
+
+  <script type="module" src="./game.js"></script>
+</body>
+</html>
