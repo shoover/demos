@@ -518,6 +518,85 @@ function applyMove(direction) {
 
 /* Input -------------------------------------------------------------------- */
 
+/**
+ * Report what the browser is doing with touches and page zoom, in the status line.
+ *
+ * Turned on with ?touchdebug=1 and off otherwise, because the thing being diagnosed --
+ * a phone zooming itself mid-game -- cannot be reproduced in an automated browser:
+ * native pinch and double-tap zoom come from the platform's own gesture recognisers,
+ * which synthetic touch events do not drive. So the page has to say what it saw.
+ *
+ * What to read: `gesture*` lines mean the platform called it a pinch. A `viewport
+ * scale` line with no gesture before it means it was a double-tap instead. Either way
+ * the touchstart lines above it name the elements the fingers landed on, and the
+ * touch-action in force there, which is what decides whether zoom was allowed.
+ */
+function startTouchDebug() {
+  const lines = [];
+  const say = (text) => {
+    lines.push(text);
+    while (lines.length > 7) {
+      lines.shift();
+    }
+    elements.status.textContent = lines.join("\n");
+  };
+
+  const scale = () =>
+    window.visualViewport ? window.visualViewport.scale.toFixed(2) : "?";
+
+  // The browser intersects touch-action up the ancestor chain, so the value that
+  // governs a touch is the first restrictive one above it, not the target's own.
+  const governing = (element) => {
+    for (let node = element; node instanceof Element; node = node.parentElement) {
+      const value = getComputedStyle(node).touchAction;
+      if (value !== "auto") {
+        return `${node.id || node.className || node.tagName.toLowerCase()}=${value}`;
+      }
+    }
+    return "auto";
+  };
+
+  const describe = (touch) => {
+    const element = touch.target instanceof Element ? touch.target : null;
+    if (element === null) {
+      return "?";
+    }
+    const name = element.id || element.className || element.tagName.toLowerCase();
+    return `${name}(${governing(element)})`;
+  };
+
+  for (const type of ["touchstart", "touchend"]) {
+    document.addEventListener(type, (event) => {
+      const touched = [...event.changedTouches].map(describe).join(" ");
+      say(`${type} n=${event.touches.length} ${touched}`);
+    }, { passive: true, capture: true });
+  }
+
+  // Safari only. These firing at all means the platform read a pinch.
+  for (const type of ["gesturestart", "gesturechange", "gestureend"]) {
+    document.addEventListener(type, (event) => {
+      say(`${type} scale=${Number(event.scale || 0).toFixed(2)}`);
+    }, { passive: true, capture: true });
+  }
+
+  if (window.visualViewport) {
+    let last = window.visualViewport.scale;
+    window.visualViewport.addEventListener("resize", () => {
+      const current = window.visualViewport.scale;
+      if (Math.abs(current - last) > 0.01) {
+        say(`ZOOM ${last.toFixed(2)} -> ${current.toFixed(2)}`);
+        last = current;
+      }
+    });
+  }
+
+  say(`touch debug on, scale=${scale()}`);
+}
+
+if (new URLSearchParams(location.search).has("touchdebug")) {
+  startTouchDebug();
+}
+
 const KEYS = new Map([
   ["arrowup", "up"], ["w", "up"],
   ["arrowdown", "down"], ["s", "down"],
