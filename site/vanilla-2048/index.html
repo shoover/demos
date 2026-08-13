@@ -544,7 +544,11 @@
           <button id="latest" type="button" disabled>Latest</button>
         </div>
       </div>
-      <p id="help">Keyboard: arrows/WASD, swipe, R to restart</p>
+      <!-- How to play, and where the game says its piece: a message stands in for the
+           instructions while it lasts, and the instructions come back when it clears.
+           Painted by the script on the first frame, so this is only what shows before
+           the stylesheet's own font has loaded. -->
+      <p id="help">Keyboard: arrows/WASD, swipe, [ and ] scrub, R to restart</p>
 
       <hr />
       <div id="board-wrap">
@@ -552,8 +556,8 @@
           <div id="grid"></div>
           <div id="tiles"></div>
           <!-- The move played from the state on screen, drawn over the board it was
-               played from. Silent to a screen reader: the message line says the same
-               thing in words. -->
+               played from. Silent to a screen reader: the timeline label beside the
+               score says which move that is, in words. -->
           <div id="next-move" aria-hidden="true" hidden>
             <svg viewBox="0 0 100 100">
               <circle cx="50" cy="50" r="46" />
@@ -566,11 +570,10 @@
       </div>
       <hr />
 
-      <!-- The readings the board is being played under sit against the board itself, so
-           they hold one place on screen; the message below them is the line that comes
-           and goes. -->
+      <!-- The readings the board is being played under, against the board itself. The
+           last line of the panel: what the game has to say is said up by the controls,
+           where the instructions it replaces were being read anyway. -->
       <p id="stats">FPS: 0 | Play time: 0s | Save p50/90/99: collecting</p>
-      <p id="message">Join matching tiles to reach 2048.</p>
 
       <div id="dpad">
         <div class="pad-pair">
