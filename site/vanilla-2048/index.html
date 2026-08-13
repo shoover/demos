@@ -157,9 +157,14 @@
     button:active { background: #4b6eaf; }
     button:focus-visible { outline: 2px solid #6f8fd0; outline-offset: 2px; }
 
+    /* Also the anchor the move-history popup positions itself against. It wraps rather
+       than overflows, since the move counter grows with the game. */
     #actions {
+      position: relative;
       display: flex;
+      flex-wrap: wrap;
       gap: 8px;
+      align-items: center;
     }
 
     /* Board ---------------------------------------------------------------- */
@@ -235,6 +240,187 @@
     .v2048 { background: #7359d9; }
     .beyond { background: #4d3d8c; }
 
+    button:disabled {
+      background: #2b2b2b;
+      color: #808080;
+      cursor: default;
+    }
+
+    button:disabled:hover { background: #2b2b2b; }
+
+    /* Timeline -------------------------------------------------------------- */
+
+    /* The clock rides in the New Game line, with the move the board is on beside it:
+       what is always up is where the game has got to, not how to walk back through it. */
+    #time-travel {
+      display: grid;
+      place-items: center;
+    }
+
+    /* Drawn rather than set: the panel's font is a Latin subset with no clock in it,
+       and an emoji would arrive in the system's own colours, which this panel has
+       none of. */
+    #time-travel svg {
+      width: 15px;
+      height: 15px;
+      fill: none;
+      stroke: currentColor;
+      stroke-width: 2;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+
+    /* Opens downward from the clock, over the help line -- which puts it just clear of
+       the board, the one thing scrubbing is for looking at.
+       One row inside, wrapping only where a phone cannot fit it: the slider keeps the
+       space the buttons leave, down to a width where dragging still works. */
+    #timeline {
+      position: absolute;
+      top: calc(100% + 6px);
+      right: 0;
+      left: 0;
+      z-index: 1;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+      padding: 8px;
+      border: 1px solid rgba(255, 255, 255, 0.14);
+      border-radius: 8px;
+      /* Opaque, and the play area's own ground rather than the panel's: the stats line
+         underneath showed through even a 6% window, and this popup casts a shadow
+         instead of blurring what is behind it, as the panel casts none either. */
+      background: #12151f;
+      box-shadow: 0 8px 28px rgba(0, 0, 0, 0.32);
+    }
+
+    #timeline[hidden] { display: none; }
+
+    /* Built out of its parts rather than themed with `accent-color`: the marker is a
+       playhead, not a bubble, and a browser's own thumb cannot be made into one. */
+    #scrubber {
+      flex: 1 1 120px;
+      min-width: 0;
+      height: 20px;
+      margin: 0;
+      appearance: none;
+      -webkit-appearance: none;
+      background: transparent;
+      /* The board reads swipes off touchstart and touchend anywhere in `main`, so a
+         drag along the slider would otherwise be delivered as a move as well. Taking
+         the touch outright leaves the drag to the control that the gesture is aimed at;
+         the swipe handler skips this row for the same reason. */
+      touch-action: none;
+    }
+
+    #scrubber:focus-visible { outline: 2px solid #6f8fd0; outline-offset: 2px; }
+
+    /* How much of the game is behind the marker. Chrome has no pseudo-element for the
+       filled part of a track, so it is a gradient stop, and game.js paints --scrub with
+       the position rather than leaving the two to disagree. Firefox has one, and takes
+       the flat track underneath. */
+    #scrubber::-webkit-slider-runnable-track {
+      height: 6px;
+      border-radius: 3px;
+      background: linear-gradient(90deg, #4b6eaf var(--scrub, 100%), #3a3f4b var(--scrub, 100%));
+    }
+
+    #scrubber::-moz-range-track {
+      height: 6px;
+      border-radius: 3px;
+      background: #3a3f4b;
+    }
+
+    #scrubber::-moz-range-progress { height: 6px; border-radius: 3px; background: #4b6eaf; }
+
+    /* The marker itself: a slim bar standing across the track. The negative margin is
+       what centres it on a 6px track WebKit would otherwise hang it below. */
+    #scrubber::-webkit-slider-thumb {
+      width: 4px;
+      height: 18px;
+      margin-top: -6px;
+      border-radius: 2px;
+      background: #e6edf3;
+      appearance: none;
+      -webkit-appearance: none;
+    }
+
+    #scrubber::-moz-range-thumb {
+      width: 4px;
+      height: 18px;
+      border: 0;
+      border-radius: 2px;
+      background: #e6edf3;
+    }
+
+    /* Nothing to scrub yet: the track reads as empty rather than as a game already run
+       end to end, and the marker sits quietly where the newest state always is. */
+    #scrubber:disabled::-webkit-slider-runnable-track { background: #33363f; }
+    #scrubber:disabled::-moz-range-progress { background: #33363f; }
+    #scrubber:disabled::-webkit-slider-thumb { background: #6f757f; }
+    #scrubber:disabled::-moz-range-thumb { background: #6f757f; }
+
+    /* The two steps are one control and sit as one: closer to each other than to the
+       track they walk along, the way the d-pad pairs its own arrows. */
+    .step-pair {
+      display: flex;
+      gap: 4px;
+    }
+
+    /* Tapped twice in a row as ordinary use -- stepping back and back, opening the
+       popup and closing it -- exactly like a d-pad arrow, so they need the same
+       defence against a phone reading two taps as a zoom. */
+    #step-back, #step-forward, #time-travel { touch-action: none; }
+
+    #timeline-label {
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+    }
+
+    /* Viewing the past: the board is drawn back from the live one, so the state on
+       screen never has to be read from the label alone. */
+    #board.past #tiles { opacity: 0.75; }
+    #board.past .cell { background: #2c303a; }
+
+    /* The move played next, over the board it was played from. It sits outside #tiles
+       so it stays crisp against the board those rules dim, and takes no pointer events
+       so a swipe across the middle of the board is still a swipe. */
+    #next-move {
+      position: absolute;
+      inset: 0;
+      display: grid;
+      place-items: center;
+      pointer-events: none;
+    }
+
+    #next-move[hidden] { display: none; }
+
+    /* Well under a tile's width: the point of scrubbing back is to read the board, and
+       a badge any bigger sits on top of the very tiles being read. */
+    #next-move svg {
+      width: calc(var(--cell) * 0.68);
+      height: calc(var(--cell) * 0.68);
+      opacity: 0.8;
+    }
+
+    /* The disc is what keeps the arrow legible over a bright tile as readily as over an
+       empty cell, and it is the page's own ground rather than a new colour. */
+    #next-move circle { fill: rgba(15, 17, 23, 0.52); }
+
+    /* Stroked in its own fill so the arrow's corners come out as round as the tiles',
+       rather than as the six points the path describes. */
+    #next-move path {
+      fill: #e6edf3;
+      stroke: #e6edf3;
+      stroke-width: 11;
+      stroke-linejoin: round;
+    }
+
+    /* One arrow, turned to the move it stands for. Drawn pointing up. */
+    #next-move.right svg { transform: rotate(90deg); }
+    #next-move.down svg { transform: rotate(180deg); }
+    #next-move.left svg { transform: rotate(-90deg); }
+
     /* D-pad ---------------------------------------------------------------- */
 
     /* Two thumb clusters, not a cross: left/right sit under the left thumb and
@@ -308,10 +494,50 @@
 
   <main>
     <section id="panel">
-      <p id="score">Score: 0  |  Moves: 0  |  Best: 0</p>
+      <p id="score">Score: 0  |  Best: 0</p>
+      <!-- The game's own controls, and after them the clock that opens the ones for
+           going back through it, with the move the board is on. -->
       <div id="actions">
         <button id="new-game" type="button">New Game</button>
         <button id="share" type="button">Share</button>
+        <button
+          id="time-travel"
+          type="button"
+          aria-label="Move history"
+          aria-expanded="false"
+          aria-controls="timeline"
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="12" cy="12" r="9" />
+            <path d="M12 6.6 V12.4 L16.2 14.8" />
+          </svg>
+        </button>
+        <span id="timeline-label">Move 0</span>
+
+        <!-- The slider is the whole game so far, one stop per move; the buttons beside
+             it step a single move, for touch and for precision.
+
+             Everything here starts disabled: a game with one state has nowhere to scrub
+             to, and the script enables what the timeline supports as it grows. The range
+             spans one move it cannot be moved along, for the reason paintTimeline gives:
+             the marker belongs at the newest state from the first frame. -->
+        <div id="timeline" hidden>
+          <div class="step-pair">
+            <button id="step-back" type="button" aria-label="Back one move" disabled>&lt;</button>
+            <button id="step-forward" type="button" aria-label="Forward one move" disabled>&gt;</button>
+          </div>
+          <input
+            id="scrubber"
+            type="range"
+            min="0"
+            max="1"
+            step="1"
+            value="1"
+            aria-label="Move history"
+            disabled
+          />
+          <button id="latest" type="button" disabled>Latest</button>
+        </div>
       </div>
       <p id="help">Keyboard: arrows/WASD, swipe, R to restart</p>
 
@@ -320,6 +546,17 @@
         <div id="board">
           <div id="grid"></div>
           <div id="tiles"></div>
+          <!-- The move played from the state on screen, drawn over the board it was
+               played from. Silent to a screen reader: the message line says the same
+               thing in words. -->
+          <div id="next-move" aria-hidden="true" hidden>
+            <svg viewBox="0 0 100 100">
+              <circle cx="50" cy="50" r="46" />
+              <!-- Drawn inside where it lands: the stroke that rounds the corners
+                   grows it back out to about here. -->
+              <path d="M50 25 L72 55 H58 V74 H42 V55 H28 Z" />
+            </svg>
+          </div>
         </div>
       </div>
       <hr />
