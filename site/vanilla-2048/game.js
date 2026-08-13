@@ -51,6 +51,7 @@ const elements = {
   status: document.getElementById("status"),
   panel: document.getElementById("panel"),
   main: document.querySelector("main"),
+  scoreLine: document.getElementById("score-line"),
   score: document.getElementById("score"),
   help: document.getElementById("help"),
   message: document.getElementById("message"),
@@ -370,8 +371,8 @@ function paintSliding(slidingTiles) {
   }));
 }
 
-// No move count here: the scrubber's own label carries it, against the total the game
-// has reached, which is more than this line ever said.
+// No move count here: the scrubber's own label shares this line and carries it, against
+// the total the game has reached, which is more than this half ever said.
 function paintScore() {
   elements.score.textContent =
     `Score: ${count(game.score)}  |  Best: ${count(game.best)}`;
@@ -403,8 +404,9 @@ function paintTimeline() {
   elements.stepBack.disabled = game.cursor === 0;
   elements.stepForward.disabled = game.atLatest;
   elements.latest.disabled = game.atLatest;
-  // The total is worth saying only when the position can differ from it. Nothing sits
-  // to the right of this label, so the two forms can be as wide as they like.
+  // The total is worth saying only when the position can differ from it. The label ends
+  // the score line, with nothing to its right, so the two forms can be as wide as they
+  // like: the line wraps before anything is pushed out of place.
   elements.timelineLabel.textContent = game.atLatest
     ? `Move ${count(game.moves)}`
     : `Move ${count(game.moves)}/${count(game.latest.moves)}`;
@@ -961,21 +963,24 @@ function drawShareBoard(context, x, y) {
 }
 
 /**
- * Draw the pieces worth sharing -- the score line, then the board with the message
- * and stats under it -- so the buttons and help text between them are left out.
+ * Draw the pieces worth sharing -- the score line, then the board with the stats and
+ * message under it -- so the buttons and help text between them are left out.
+ *
+ * The lines are read off the panel in the order the panel stacks them, so the image is
+ * of the page rather than of an arrangement only this function knows about.
  *
  * Type comes off the panel itself rather than from numbers written down here, so the
  * shared image cannot end up in a different face or size than the page it is of.
  */
 function renderShareImage() {
   const boardSize = SHARE_CELL * SIZE + SHARE_TILE_GAP * (SIZE - 1);
-  const panelStyle = getComputedStyle(elements.score);
+  const panelStyle = getComputedStyle(elements.scoreLine);
   const font = `${panelStyle.fontSize} ${panelStyle.fontFamily}`;
   const lineHeight = Math.round(parseFloat(panelStyle.fontSize) * 1.5);
   const lines = [
-    elements.score.textContent,
-    elements.message.textContent,
+    elements.scoreLine.textContent,
     elements.stats.textContent,
+    elements.message.textContent,
   ];
 
   const canvas = document.createElement("canvas");
