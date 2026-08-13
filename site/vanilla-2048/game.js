@@ -14,6 +14,10 @@ const SLIDE_MS = 100;
 const BURST_MS = 120;
 const APPEAR_FROM = 0.6;
 const MERGE_PEAK = 1.08;
+// The next-move indicator's arrival: a longer, softer version of a tile's burst, over a
+// tenth of a cell, so scrubbing reads as motion without flickering.
+const INDICATOR_MS = 180;
+const INDICATOR_NUDGE = 0.1;
 // A held key or a hammered button must not start a move before the previous one has
 // landed, so the throttle is a property of the slide rather than of any one input
 // device. Every input path funnels through applyMove.
@@ -38,6 +42,11 @@ const COMPACT_GAP = 6;
 
 const GAME_OVER_MESSAGE = "No moves left. Press R or New Game.";
 
+// Which way the board moved, in cells, for the nudge the indicator arrives with.
+const DIRECTION_STEPS = new Map([
+  ["up", [0, -1]], ["down", [0, 1]], ["left", [-1, 0]], ["right", [1, 0]],
+]);
+
 const elements = {
   status: document.getElementById("status"),
   panel: document.getElementById("panel"),
@@ -51,6 +60,14 @@ const elements = {
   grid: document.getElementById("grid"),
   tiles: document.getElementById("tiles"),
   overlay: document.getElementById("overlay"),
+  nextMove: document.getElementById("next-move"),
+  timeTravel: document.getElementById("time-travel"),
+  timeline: document.getElementById("timeline"),
+  scrubber: document.getElementById("scrubber"),
+  stepBack: document.getElementById("step-back"),
+  stepForward: document.getElementById("step-forward"),
+  latest: document.getElementById("latest"),
+  timelineLabel: document.getElementById("timeline-label"),
 };
 
 const compactMedia = window.matchMedia(
@@ -353,9 +370,128 @@ function paintSliding(slidingTiles) {
   }));
 }
 
+// No move count here: the scrubber's own label carries it, against the total the game
+// has reached, which is more than this line ever said.
 function paintScore() {
   elements.score.textContent =
-    `Score: ${count(game.score)}  |  Moves: ${count(game.moves)}  |  Best: ${count(game.best)}`;
+    `Score: ${count(game.score)}  |  Best: ${count(game.best)}`;
+}
+
+// Refused while the past is on screen, since a move can only be made from the latest
+// state: a live-looking d-pad over a board that will not budge is the wrong signal.
+const dpadButtons = [...document.querySelectorAll("#dpad button")];
+
+/**
+ * Draw the scrubber against the timeline as it now stands.
+ *
+ * The slider is indexed by timeline position but labelled by move count, because the
+ * two part company once the oldest states are trimmed away: position 0 is then some
+ * move other than the first.
+ */
+function paintTimeline() {
+  const lastIndex = game.timeline.length - 1;
+  // A game one state long has nowhere to scrub to, but a range whose ends meet parks
+  // its marker at the left and is then thrown to the right by the first move. So the
+  // slider is given a move it cannot be dragged along instead: the marker stands where
+  // the newest state always stands, and the first move leaves it exactly there.
+  const span = Math.max(lastIndex, 1);
+  const position = lastIndex === 0 ? span : game.cursor;
+  elements.scrubber.max = String(span);
+  elements.scrubber.value = String(position);
+  elements.scrubber.disabled = lastIndex === 0;
+  elements.scrubber.style.setProperty("--scrub", `${(position / span) * 100}%`);
+  elements.stepBack.disabled = game.cursor === 0;
+  elements.stepForward.disabled = game.atLatest;
+  elements.latest.disabled = game.atLatest;
+  // The total is worth saying only when the position can differ from it. Nothing sits
+  // to the right of this label, so the two forms can be as wide as they like.
+  elements.timelineLabel.textContent = game.atLatest
+    ? `Move ${count(game.moves)}`
+    : `Move ${count(game.moves)}/${count(game.latest.moves)}`;
+  elements.board.classList.toggle("past", !game.atLatest);
+  for (const button of dpadButtons) {
+    button.disabled = !game.atLatest;
+  }
+  paintNextMove();
+}
+
+/**
+ * Show or hide the scrubbing controls.
+ *
+ * A popup rather than a line of the panel: they are wanted occasionally and are as wide
+ * as the panel, while every other line there earns its height in every game. What is
+ * always up is the move the board is on, and the clock that opens this.
+ *
+ * Opening hands focus to the slider, which is what was asked for; closing hands it back
+ * to the clock, but only if it was still inside -- a click elsewhere on the page has
+ * already put focus where that click meant it to go.
+ */
+function setTimelineOpen(open) {
+  elements.timeline.hidden = !open;
+  elements.timeTravel.setAttribute("aria-expanded", String(open));
+  if (open) {
+    elements.scrubber.focus();
+  } else if (elements.timeline.contains(document.activeElement)) {
+    elements.timeTravel.focus();
+  }
+}
+
+/**
+ * Put the popup away and the newest state back on the board.
+ *
+ * Looking at an earlier board is what the popup is open for, so leaving one behind when
+ * it closes would leave the game somewhere it cannot be played from with nothing on
+ * screen to say why. Dismissing is how you get back to playing.
+ */
+function closeTimeline() {
+  setTimelineOpen(false);
+  showState(game.timeline.length - 1);
+}
+
+// The indicator on its way in, or null once it has arrived. The element is part of the
+// page rather than painted per state, so one reference outlives every repaint.
+let indicator = null;
+
+/**
+ * Point the indicator at the move played from the state on screen, and start it in.
+ *
+ * Restarted even when the arrow is already pointing that way, so scrubbing through a
+ * run of moves in one direction reads as a move per state rather than as one arrow
+ * sitting still.
+ */
+function paintNextMove() {
+  const direction = game.nextDirection;
+  elements.nextMove.hidden = direction === null;
+  // The direction is the only class the element carries, so it can simply replace
+  // whatever the state before it left there.
+  elements.nextMove.className = direction ?? "";
+  indicator = direction === null ? null : { direction, startedAt: performance.now() };
+  // Placed before the first paint, so the arrow is never drawn at rest and then moved.
+  stepIndicator(performance.now());
+}
+
+/**
+ * Draw the indicator back to where it settles.
+ *
+ * It lands a little past its resting place, along the axis it points down, and eases
+ * back -- the same overshoot a merging tile makes, and the same reason: an arrival
+ * reads as one. A still arrow says which way; the recoil says a move happened.
+ * Animated from the frame loop next to the slides and the bursts, for the reason
+ * given over stepSlide.
+ */
+function stepIndicator(now) {
+  if (indicator === null) {
+    return;
+  }
+  const progress = (now - indicator.startedAt) / INDICATOR_MS;
+  if (progress >= 1) {
+    elements.nextMove.style.transform = "";
+    indicator = null;
+    return;
+  }
+  const [dx, dy] = DIRECTION_STEPS.get(indicator.direction);
+  const distance = cellSize * INDICATOR_NUDGE * (1 - easeOutCubic(progress));
+  elements.nextMove.style.transform = `translate(${dx * distance}px, ${dy * distance}px)`;
 }
 
 function paintStats(playSeconds) {
@@ -369,10 +505,21 @@ function setMessage(text) {
   elements.message.textContent = text;
 }
 
+/**
+ * Say what the state on screen is, after `prefix` where there is news to go with it.
+ *
+ * Nothing is said about viewing the past or about which move came next: the arrow over
+ * the board, the tiles drawn back, and the flat d-pad say all of it without prose.
+ */
+function paintMessage(prefix = "") {
+  const state = game.gameOver ? GAME_OVER_MESSAGE : "";
+  setMessage([prefix, state].filter(Boolean).join(" "));
+}
+
 function paintHelp() {
   elements.help.textContent = compactMedia.matches
     ? "Swipe to move. R restarts."
-    : "Keyboard: arrows/WASD, swipe, R to restart";
+    : "Keyboard: arrows/WASD, swipe, [ and ] scrub, R to restart";
 }
 
 /* Sizing ------------------------------------------------------------------- */
@@ -479,11 +626,36 @@ function startNewGame() {
   const spawned = game.reset();
   slide = null;
   lastMoveAt = -Infinity;
+  // Every control in it is about to be disabled: a new game has nowhere to scrub to.
+  setTimelineOpen(false);
   paintSettled({ appeared: new Set(spawned) });
   paintScore();
+  paintTimeline();
   setMessage("New game. Use arrow keys, WASD, or the buttons.");
   playTime.set(0, false);
   saver.save(game, 0);
+}
+
+/**
+ * Show the state at a timeline position, and say which one it is.
+ *
+ * No animation between states: scrubbing is looking rather than playing, and a drag
+ * along the slider crosses dozens of states in the time one slide would take. A slide
+ * still in flight is landed first, so it cannot finish over the state seeked to.
+ *
+ * The move that reaches the newest state again is not saved from here; the interval
+ * save picks the cursor up, which keeps a drag from writing storage once per stop.
+ */
+function showState(index) {
+  if (!acceptingInput) {
+    return;
+  }
+  landSlide();
+  game.seek(index);
+  paintSettled();
+  paintScore();
+  paintTimeline();
+  paintMessage();
 }
 
 function applyMove(direction) {
@@ -492,6 +664,8 @@ function applyMove(direction) {
     return;
   }
 
+  // Refused, silently, while an earlier state is on screen: move() knows not to play
+  // from one, and the board already looks like something that cannot be played.
   const result = game.move(direction);
   if (result === null) {
     return;
@@ -507,7 +681,8 @@ function applyMove(direction) {
   );
 
   paintScore();
-  setMessage(game.gameOver ? GAME_OVER_MESSAGE : "");
+  paintTimeline();
+  paintMessage();
   const playSeconds = playTime.elapsed();
   playTime.set(playSeconds, !game.gameOver);
   if (result.bestChanged) {
@@ -603,17 +778,35 @@ const KEYS = new Map([
   ["arrowleft", "left"], ["a", "left"],
   ["arrowright", "right"], ["d", "right"],
   ["r", "restart"],
+  ["[", "back"], ["]", "forward"],
 ]);
 
 window.addEventListener("keydown", (event) => {
   if (event.ctrlKey || event.metaKey || event.altKey) {
     return;
   }
+  if (event.key === "Escape" && !elements.timeline.hidden) {
+    event.preventDefault();
+    closeTimeline();
+    return;
+  }
   const action = KEYS.get(event.key.toLowerCase());
   if (!action) {
     return;
   }
+  // A focused scrubber owns the arrow keys: they are how a slider is driven from the
+  // keyboard, and its own input event brings the board along. Everything else -- WASD,
+  // R, the bracket keys -- still plays from wherever focus happens to be.
+  if (event.target === elements.scrubber && event.key.startsWith("Arrow")) {
+    return;
+  }
   event.preventDefault();
+  if (action === "back" || action === "forward") {
+    // Repeats deliberately, unlike a move: holding a bracket key rewinds or replays,
+    // which is the point of a scrubber on a game hundreds of moves long.
+    showState(game.cursor + (action === "forward" ? 1 : -1));
+    return;
+  }
   if (event.repeat) {
     return;
   }
@@ -628,8 +821,9 @@ let touchStart = null;
 
 elements.main.addEventListener("touchstart", (event) => {
   // Buttons handle their own taps: swallowing the touch here would cost them the
-  // click the browser synthesizes from it.
-  if (event.touches.length !== 1 || event.target.closest("button")) {
+  // click the browser synthesizes from it. The popup is skipped whole, because
+  // dragging the scrubber is a swipe by any measure taken here.
+  if (event.touches.length !== 1 || event.target.closest("button, #timeline")) {
     touchStart = null;
     return;
   }
@@ -660,21 +854,50 @@ elements.main.addEventListener("touchcancel", () => {
   touchStart = null;
 });
 
-for (const direction of ["up", "down", "left", "right"]) {
-  const button = document.getElementById(direction);
-  // Mouse and keyboard.
-  button.addEventListener("click", () => applyMove(direction));
-  // Touch, which cannot be left to the click the browser would synthesise. Tapping
-  // one arrow twice in a row is ordinary play and iOS reads it as a double tap, then
-  // zooms the page to fit the pad -- 274px of it, which is the 1.6x that kept
-  // happening. `touch-action` does not stop that on WebKit whatever it is set to, but
-  // refusing the touch's own default does, and refusing it also cancels the click, so
-  // the move has to be applied from here.
+/**
+ * Wire a button that gets tapped over and over: a d-pad arrow, a timeline step.
+ *
+ * The click covers mouse and keyboard. Touch cannot be left to the click the browser
+ * would synthesise: tapping one button twice in a row is ordinary use here and iOS
+ * reads it as a double tap, then zooms the page to fit the button -- 274px of the pad,
+ * which is the 1.6x that kept happening. `touch-action` does not stop that on WebKit
+ * whatever it is set to, but refusing the touch's own default does, and refusing it
+ * also cancels the click, so the press has to be delivered from here.
+ */
+function onPress(button, press) {
+  button.addEventListener("click", press);
   button.addEventListener("touchend", (event) => {
     event.preventDefault();
-    applyMove(direction);
+    press();
   }, { passive: false });
 }
+
+for (const direction of ["up", "down", "left", "right"]) {
+  onPress(document.getElementById(direction), () => applyMove(direction));
+}
+onPress(elements.stepBack, () => showState(game.cursor - 1));
+onPress(elements.stepForward, () => showState(game.cursor + 1));
+onPress(elements.timeTravel, () => {
+  if (elements.timeline.hidden) {
+    setTimelineOpen(true);
+  } else {
+    closeTimeline();
+  }
+});
+elements.latest.addEventListener("click", () => showState(game.timeline.length - 1));
+elements.scrubber.addEventListener("input", () =>
+  showState(Number(elements.scrubber.value))
+);
+
+// Dismissed by a press anywhere else -- the board included, since a swipe there is a
+// move rather than an accident. Not the clock, which has its own press to close, and
+// not the popup itself. Escape closes it too; see the key handler.
+document.addEventListener("pointerdown", (event) => {
+  const target = event.target instanceof Element ? event.target : null;
+  if (!elements.timeline.hidden && target?.closest("#timeline, #time-travel") === null) {
+    closeTimeline();
+  }
+});
 document.getElementById("new-game").addEventListener("click", startNewGame);
 document.getElementById("share").addEventListener("click", () => {
   share().catch((error) => {
@@ -880,7 +1103,9 @@ function restoreGame() {
   }
   const saved = decodeSavedState(serialized, game.best);
   game.restore(saved);
-  playTime.set(saved.playSeconds, saved.moves > 0 && !saved.gameOver);
+  // The clock belongs to the game, not to the state being looked at: it runs whenever
+  // the newest state is a game under way, however far back the scrubber was left.
+  playTime.set(saved.playSeconds, game.latest.moves > 0 && !game.latest.gameOver);
   return true;
 }
 
@@ -898,8 +1123,9 @@ function start() {
   }
 
   if (restored) {
-    setMessage(`Saved game restored.${game.gameOver ? ` ${GAME_OVER_MESSAGE}` : ""}`);
+    paintMessage("Saved game restored.");
     paintScore();
+    paintTimeline();
     paintSettled();
     saver.defer();
   } else {
@@ -914,6 +1140,7 @@ function frame(now) {
   // move, so the tiles are placed for their first painted frame rather than after it.
   stepSlide(now);
   stepBursts(now);
+  stepIndicator(now);
   frameRate.sample(now);
 
   const playSeconds = playTime.elapsed();
