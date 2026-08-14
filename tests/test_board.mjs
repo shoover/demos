@@ -329,6 +329,53 @@ test("the next move is the one played from the state on screen", () => {
   assert.equal(game.nextDirection, null);
 });
 
+test("a state names the cells its move merged into and spawned onto", () => {
+  const game = newGame([
+    [2, 2, 0, 0],
+    [0, 0, 0, 0],
+    [0, 0, 0, 0],
+    [0, 0, 0, 0],
+  ]);
+  const result = game.move("left");
+  const { merged, appeared } = game.arrival;
+  assert.deepEqual([...merged], [...result.mergedCells]);
+  assert.deepEqual([...appeared], [result.spawnedCell]);
+});
+
+test("what a state arrived with is worked out again rather than stored", () => {
+  const played = newGame();
+  played.reset();
+  const results = ["left", "down", "right"].map((direction) => played.move(direction));
+
+  // Through the save format, which carries boards and directions and nothing else.
+  const restored = newGame();
+  restored.restore(decodeSavedState(played.encode(1), played.best));
+  const sorted = (cells) => [...cells].sort((a, b) => a - b);
+  results.forEach((result, index) => {
+    assert.notEqual(result, null);
+    restored.seek(index + 1);
+    assert.deepEqual(sorted(restored.arrival.merged), sorted(result.mergedCells));
+    assert.deepEqual([...restored.arrival.appeared], [result.spawnedCell]);
+  });
+});
+
+test("a state with no move behind it arrived with nothing", () => {
+  const game = newGame();
+  game.reset();
+  game.move("left");
+
+  // The opening board of a game: two tiles that were placed rather than played to.
+  game.seek(0);
+  assert.deepEqual([...game.arrival.merged], []);
+  assert.deepEqual([...game.arrival.appeared], []);
+
+  // And a state whose move was dropped with the states before it, or never recorded.
+  game.timeline[1].direction = null;
+  game.seek(1);
+  assert.deepEqual([...game.arrival.merged], []);
+  assert.deepEqual([...game.arrival.appeared], []);
+});
+
 test("a new game has no move to show on its opening board", () => {
   const game = newGame();
   game.reset();
