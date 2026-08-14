@@ -125,6 +125,14 @@
       white-space: pre-wrap;
     }
 
+    /* The move counter, at the end of the score line. Fixed-width digits so the line
+       does not twitch as the count rolls over, and unbreakable so a wrap lands between
+       it and the score rather than inside "Move 128/512". */
+    #timeline-label {
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+    }
+
     /* No secondary text scale or colour inside the panel: imgui draws every line of
        that window in one size and one colour, help and stats included. Only the page
        header, which the other demo styles with this same stylesheet, is set apart. */
@@ -250,8 +258,8 @@
 
     /* Timeline -------------------------------------------------------------- */
 
-    /* The clock rides in the New Game line, with the move the board is on beside it:
-       what is always up is where the game has got to, not how to walk back through it. */
+    /* The clock rides in the New Game line, under the move the board is on: what is
+       always up is where the game has got to, not how to walk back through it. */
     #time-travel {
       display: grid;
       place-items: center;
@@ -372,11 +380,6 @@
        defence against a phone reading two taps as a zoom. */
     #step-back, #step-forward, #time-travel { touch-action: none; }
 
-    #timeline-label {
-      font-variant-numeric: tabular-nums;
-      white-space: nowrap;
-    }
-
     /* Viewing the past: the board is drawn back from the live one, so the state on
        screen never has to be read from the label alone. */
     #board.past #tiles { opacity: 0.75; }
@@ -494,9 +497,12 @@
 
   <main>
     <section id="panel">
-      <p id="score">Score: 0  |  Best: 0</p>
+      <!-- Where the game has got to, on one line: the score, and the move the board is
+           on beside it. The clock that walks back through those moves stays below, with
+           the rest of the controls. -->
+      <p id="score-line"><span id="score">Score: 0  |  Best: 0</span>  |  <span id="timeline-label">Move 0</span></p>
       <!-- The game's own controls, and after them the clock that opens the ones for
-           going back through it, with the move the board is on. -->
+           going back through it. -->
       <div id="actions">
         <button id="new-game" type="button">New Game</button>
         <button id="share" type="button">Share</button>
@@ -512,7 +518,6 @@
             <path d="M12 6.6 V12.4 L16.2 14.8" />
           </svg>
         </button>
-        <span id="timeline-label">Move 0</span>
 
         <!-- The slider is the whole game so far, one stop per move; the buttons beside
              it step a single move, for touch and for precision.
@@ -539,7 +544,11 @@
           <button id="latest" type="button" disabled>Latest</button>
         </div>
       </div>
-      <p id="help">Keyboard: arrows/WASD, swipe, R to restart</p>
+      <!-- How to play, and where the game says its piece: a message stands in for the
+           instructions while it lasts, and the instructions come back when it clears.
+           Painted by the script on the first frame, so this is only what shows before
+           the stylesheet's own font has loaded. -->
+      <p id="help">Keyboard: arrows/WASD, swipe, [ and ] scrub, R to restart</p>
 
       <hr />
       <div id="board-wrap">
@@ -547,8 +556,8 @@
           <div id="grid"></div>
           <div id="tiles"></div>
           <!-- The move played from the state on screen, drawn over the board it was
-               played from. Silent to a screen reader: the message line says the same
-               thing in words. -->
+               played from. Silent to a screen reader: the timeline label beside the
+               score says which move that is, in words. -->
           <div id="next-move" aria-hidden="true" hidden>
             <svg viewBox="0 0 100 100">
               <circle cx="50" cy="50" r="46" />
@@ -561,7 +570,9 @@
       </div>
       <hr />
 
-      <p id="message">Join matching tiles to reach 2048.</p>
+      <!-- The readings the board is being played under, against the board itself. The
+           last line of the panel: what the game has to say is said up by the controls,
+           where the instructions it replaces were being read anyway. -->
       <p id="stats">FPS: 0 | Play time: 0s | Save p50/90/99: collecting</p>
 
       <div id="dpad">

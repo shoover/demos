@@ -51,9 +51,9 @@ const elements = {
   status: document.getElementById("status"),
   panel: document.getElementById("panel"),
   main: document.querySelector("main"),
+  scoreLine: document.getElementById("score-line"),
   score: document.getElementById("score"),
   help: document.getElementById("help"),
-  message: document.getElementById("message"),
   stats: document.getElementById("stats"),
   boardWrap: document.getElementById("board-wrap"),
   board: document.getElementById("board"),
@@ -370,8 +370,8 @@ function paintSliding(slidingTiles) {
   }));
 }
 
-// No move count here: the scrubber's own label carries it, against the total the game
-// has reached, which is more than this line ever said.
+// No move count here: the scrubber's own label shares this line and carries it, against
+// the total the game has reached, which is more than this half ever said.
 function paintScore() {
   elements.score.textContent =
     `Score: ${count(game.score)}  |  Best: ${count(game.best)}`;
@@ -403,8 +403,9 @@ function paintTimeline() {
   elements.stepBack.disabled = game.cursor === 0;
   elements.stepForward.disabled = game.atLatest;
   elements.latest.disabled = game.atLatest;
-  // The total is worth saying only when the position can differ from it. Nothing sits
-  // to the right of this label, so the two forms can be as wide as they like.
+  // The total is worth saying only when the position can differ from it. The label ends
+  // the score line, with nothing to its right, so the two forms can be as wide as they
+  // like: the line wraps before anything is pushed out of place.
   elements.timelineLabel.textContent = game.atLatest
     ? `Move ${count(game.moves)}`
     : `Move ${count(game.moves)}/${count(game.latest.moves)}`;
@@ -501,8 +502,14 @@ function paintStats(playSeconds) {
     ` | Save p50/90/99: ${saver.summary()}`;
 }
 
+// What the game currently has to say, or "" when it has nothing. Kept here rather than
+// read back off the line it is painted into, because that line is only showing it while
+// there is something to show.
+let message = "";
+
 function setMessage(text) {
-  elements.message.textContent = text;
+  message = text;
+  paintHelp();
 }
 
 /**
@@ -516,10 +523,23 @@ function paintMessage(prefix = "") {
   setMessage([prefix, state].filter(Boolean).join(" "));
 }
 
-function paintHelp() {
-  elements.help.textContent = compactMedia.matches
+function instructions() {
+  return compactMedia.matches
     ? "Swipe to move. R restarts."
     : "Keyboard: arrows/WASD, swipe, [ and ] scrub, R to restart";
+}
+
+/**
+ * Paint the line under the controls: what the game has to say, or how to play it.
+ *
+ * One line rather than two, because the two were never both worth reading at once. The
+ * instructions are what a fresh board needs and are the same words every game; a
+ * message is news, and news is worth the more prominent line while it lasts. Every
+ * message clears itself -- the next move paints an empty one -- so the instructions
+ * come back on their own, and the panel's height never moves either way.
+ */
+function paintHelp() {
+  elements.help.textContent = message || instructions();
 }
 
 /* Sizing ------------------------------------------------------------------- */
@@ -631,7 +651,9 @@ function startNewGame() {
   paintSettled({ appeared: new Set(spawned) });
   paintScore();
   paintTimeline();
-  setMessage("New game. Use arrow keys, WASD, or the buttons.");
+  // Just the news: the line it is standing in already says how to play, and saying it
+  // again in fewer words would be the one thing this message costs.
+  setMessage("New game.");
   playTime.set(0, false);
   saver.save(game, 0);
 }
@@ -961,22 +983,23 @@ function drawShareBoard(context, x, y) {
 }
 
 /**
- * Draw the pieces worth sharing -- the score line, then the board with the message
- * and stats under it -- so the buttons and help text between them are left out.
+ * Draw the pieces worth sharing -- the score line, then the board with the stats and
+ * whatever the game has to say under it -- so the buttons are left out.
+ *
+ * The message is taken from the game rather than off the line it shares with the
+ * instructions, so an image made on a quiet board carries no line at all instead of a
+ * copy of the keyboard help.
  *
  * Type comes off the panel itself rather than from numbers written down here, so the
  * shared image cannot end up in a different face or size than the page it is of.
  */
 function renderShareImage() {
   const boardSize = SHARE_CELL * SIZE + SHARE_TILE_GAP * (SIZE - 1);
-  const panelStyle = getComputedStyle(elements.score);
+  const panelStyle = getComputedStyle(elements.scoreLine);
   const font = `${panelStyle.fontSize} ${panelStyle.fontFamily}`;
   const lineHeight = Math.round(parseFloat(panelStyle.fontSize) * 1.5);
-  const lines = [
-    elements.score.textContent,
-    elements.message.textContent,
-    elements.stats.textContent,
-  ];
+  const belowBoard = [elements.stats.textContent, message].filter(Boolean);
+  const lines = [elements.scoreLine.textContent, ...belowBoard];
 
   const canvas = document.createElement("canvas");
   const context = canvas.getContext("2d");
@@ -985,7 +1008,8 @@ function renderShareImage() {
     boardSize,
     ...lines.map((line) => context.measureText(line).width)
   );
-  const height = lineHeight + SHARE_GAP + boardSize + SHARE_GAP + lineHeight * 2;
+  const height =
+    lineHeight + SHARE_GAP + boardSize + SHARE_GAP + lineHeight * belowBoard.length;
 
   canvas.width = (width + SHARE_PAD * 2) * SHARE_SCALE;
   canvas.height = (height + SHARE_PAD * 2) * SHARE_SCALE;
@@ -1006,9 +1030,10 @@ function renderShareImage() {
   y += lineHeight + SHARE_GAP;
   drawShareBoard(context, SHARE_PAD + (width - boardSize) / 2, y);
   y += boardSize + SHARE_GAP;
-  text(lines[1], y);
-  y += lineHeight;
-  text(lines[2], y);
+  for (const line of belowBoard) {
+    text(line, y);
+    y += lineHeight;
+  }
   return canvas;
 }
 
