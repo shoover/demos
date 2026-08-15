@@ -4,7 +4,7 @@
  */
 
 import { SIZE, Game, SaveError, decodeSavedState } from "./board.js";
-import { abbreviate, count } from "./format.js";
+import { abbreviate, count, formatDuration } from "./format.js";
 import { binGame } from "./stats.js";
 
 const BEST_SCORE_KEY = "vanilla-2048.bestScore";
@@ -534,8 +534,11 @@ function paintTimeline() {
   // which move is on screen, one of a set, and needs that set beside it to mean anything.
   // The label ends its line, with nothing to its right, so the two forms can be as wide
   // as they like without pushing anything out of place.
+  // Abbreviated at the latest state, where it sits on the progress line beside the
+  // clock and has to stay short; exact while scrubbing, where it stands alone below
+  // the board and a player paging through history wants the real move number.
   elements.timelineLabel.textContent = game.atLatest
-    ? `Moves: ${count(game.moves)}`
+    ? `Moves: ${abbreviate(game.moves)}`
     : `Move ${count(game.moves)}/${count(game.latest.moves)}`;
   elements.board.classList.toggle("past", !game.atLatest);
   elements.board.classList.toggle("paused", popupOpen());
@@ -647,9 +650,9 @@ function stepIndicator(now) {
 //
 // "Time" rather than "Play time", which is what it is called everywhere it is discussed:
 // the label sits third of four on a line that was already wrapping on a phone, and what
-// a clock in seconds beside a score is measuring is not in much doubt.
+// a clock beside a score is measuring is not in much doubt.
 function paintPlayTime(playSeconds) {
-  elements.playTimeLabel.textContent = `Time: ${playSeconds.toFixed(0)}s`;
+  elements.playTimeLabel.textContent = `Time: ${formatDuration(playSeconds)}`;
 }
 
 function paintStats() {
