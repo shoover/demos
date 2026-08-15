@@ -72,6 +72,7 @@ const elements = {
   stepBack: document.getElementById("step-back"),
   stepForward: document.getElementById("step-forward"),
   latest: document.getElementById("latest"),
+  playFromHere: document.getElementById("play-from-here"),
   timelineLabel: document.getElementById("timeline-label"),
 };
 
@@ -395,11 +396,30 @@ function paintSliding(slidingTiles) {
   }));
 }
 
-// No move count here: the scrubber's own label shares this line and carries it, against
-// the total the game has reached, which is more than this half ever said.
+/**
+ * What the state on screen is worth, and what has ever been reached.
+ *
+ * No move count here: the scrubber's own label shares this line and carries it, against
+ * the total the game has reached, which is more than this half ever said.
+ *
+ * An asterisk is the whole of what marks a game that has been played on from an earlier
+ * state, and there is deliberately no counterpart on a clean one: a score with nothing
+ * beside it is a score, which is what it was before any of this existed. The best line
+ * carries the replayed track in brackets after the clean one, and carries it only once
+ * there is one -- a player who has never taken a move back never sees a bracket.
+ */
 function paintScore() {
+  const best =
+    game.replayedBest > 0
+      ? `${count(game.best)} (${count(game.replayedBest)}*)`
+      : count(game.best);
   elements.score.textContent =
-    `Score: ${count(game.score)}  |  Best: ${count(game.best)}`;
+    `Score: ${count(game.score)}${game.replayed ? "*" : ""}  |  Best: ${best}`;
+  // What the asterisk is short for. The move it names is the one thing the mark itself
+  // cannot say, and the line has no room to say it in.
+  elements.score.title = game.replayed
+    ? `Played on from move ${count(game.replayedFrom)}`
+    : "";
 }
 
 // Refused while the past is on screen, since a move can only be made from the latest
@@ -428,6 +448,7 @@ function paintTimeline() {
   elements.stepBack.disabled = game.cursor === 0;
   elements.stepForward.disabled = game.atLatest;
   elements.latest.disabled = game.atLatest;
+  elements.playFromHere.disabled = game.atLatest;
   // The total is worth saying only when the position can differ from it. The label ends
   // the score line, with nothing to its right, so the two forms can be as wide as they
   // like: the line wraps before anything is pushed out of place.
@@ -750,6 +771,34 @@ function showState(index) {
   repaint(game.arrival);
 }
 
+/**
+ * Take up the game again from the state at `index`, dropping what it had gone on to do.
+ *
+ * Nothing here has to turn play back on: the board un-dims and the d-pad comes back by
+ * themselves, because everything that was refusing input was reading atLatest, and the
+ * state resumed at has just become the newest one.
+ *
+ * The board bursts as it would have when the move that reached it was played, which is
+ * how every other landing on a state is drawn -- and here it is also the only thing on
+ * screen that moves, since the tiles are already the ones being resumed from.
+ *
+ * `describe` is called after the fact, so it reads the game as it now stands.
+ */
+function playFrom(index, describe) {
+  if (!acceptingInput) {
+    return;
+  }
+  landSlide();
+  const discarded = game.playFrom(index);
+  if (discarded === 0) {
+    return;
+  }
+  repaint(game.arrival, describe(discarded));
+  // Always, rather than on a reported change: the fork is what carried the clean best
+  // across to the replayed track, and that is a write whether or not it moved a number.
+  commitChange(true);
+}
+
 function applyMove(direction) {
   const now = performance.now();
   if (!acceptingInput || now - lastMoveAt < INPUT_THROTTLE_MS) {
@@ -970,6 +1019,16 @@ onPress(elements.timeTravel, () => {
   }
 });
 elements.latest.addEventListener("click", () => showState(game.timeline.length - 1));
+elements.playFromHere.addEventListener("click", () => {
+  playFrom(
+    game.cursor,
+    (discarded) =>
+      `Playing on from move ${count(game.moves)}. ${count(discarded)} discarded.`
+  );
+  // Not closeTimeline, which puts the newest state back on the board: the state on
+  // screen has just become the newest one, and going back to playing is the point.
+  setTimelineOpen(false);
+});
 elements.scrubber.addEventListener("input", () =>
   showState(Number(elements.scrubber.value))
 );
@@ -1111,10 +1170,17 @@ async function share() {
 
   const filename = `2048-score-${game.score}.png`;
   const file = new File([blob], filename, { type: "image/png" });
+  // The image carries the asterisk on its own, since it is drawn from the score line as
+  // it stands. This sentence is built here rather than read off the page, so it is the
+  // one place the mark has to be repeated by hand.
+  const replayed = game.replayed
+    ? `, played on from move ${count(game.replayedFrom)}`
+    : "";
   const payload = {
     files: [file],
     title: "2048",
-    text: `2048: ${count(game.score)} points in ${count(game.moves)} moves.`,
+    text:
+      `2048: ${count(game.score)} points in ${count(game.moves)} moves${replayed}.`,
   };
   if (navigator.canShare && navigator.canShare(payload)) {
     await navigator.share(payload);
@@ -1219,7 +1285,16 @@ function start() {
   if (restored) {
     // At rest, unlike a state scrubbed to: reopening a save is not a move arriving,
     // however far back the state it opens on sits.
-    repaint(undefined, "Saved game restored.");
+    //
+    // A replayed game says so on the way in. The asterisk it reopens with is a mark
+    // whose meaning has to be learned; the sentence beside it, once, is where it can be
+    // learned from -- and the move it names is the one thing the mark cannot carry.
+    repaint(
+      undefined,
+      game.replayed
+        ? `Saved game restored, replayed from move ${count(game.replayedFrom)}.`
+        : "Saved game restored."
+    );
     saver.defer();
   } else {
     startNewGame();

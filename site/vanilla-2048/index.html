@@ -541,7 +541,17 @@
             aria-label="Move history"
             disabled
           />
+          <!-- The two ends of the same decision, and disabled in opposite conditions:
+               one goes back to where the game had got to, the other makes this state
+               where it has got to. Both are pointless on the newest state, which is why
+               only one of them can ever be pressed. -->
           <button id="latest" type="button" disabled>Latest</button>
+          <button
+            id="play-from-here"
+            type="button"
+            title="Resume play here, discarding the moves after this one"
+            disabled
+          >Play from here</button>
         </div>
       </div>
       <!-- How to play, and where the game says its piece: a message stands in for the
