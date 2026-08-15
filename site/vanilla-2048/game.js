@@ -89,6 +89,24 @@ const compactMedia = window.matchMedia(
 
 const count = (value) => value.toLocaleString("en-US");
 
+// The score line's own numbers, short enough that the line never wraps: a comma-grouped
+// score can run to eight digits once a game has been replayed past a high best, and at
+// that length the panel is narrower than the line on anything but a wide desktop. One
+// decimal place, dropped when it would just be a trailing zero, is what keeps "10.1k"
+// short and "10M" from reading as "10.0M".
+const abbreviate = (value) => {
+  for (const [threshold, suffix] of [
+    [1e9, "B"],
+    [1e6, "M"],
+    [1e3, "k"],
+  ]) {
+    if (value >= threshold) {
+      return `${Math.round((value / threshold) * 10) / 10}${suffix}`;
+    }
+  }
+  return String(value);
+};
+
 function setStatus(text, clearAfterMs) {
   elements.status.textContent = text;
   if (clearAfterMs) {
@@ -466,15 +484,17 @@ function paintSliding(slidingTiles) {
 function paintScore() {
   const best =
     game.replayedBest > 0
-      ? `${count(game.best)} (${count(game.replayedBest)}*)`
-      : count(game.best);
+      ? `${abbreviate(game.best)} (${abbreviate(game.replayedBest)}*)`
+      : abbreviate(game.best);
   elements.scoreLine.textContent =
-    `Score: ${count(game.score)}${game.replayed ? "*" : ""}  |  Best: ${best}`;
-  // What the asterisk is short for. The move it names is the one thing the mark itself
-  // cannot say, and the line has no room to say it in.
-  elements.scoreLine.title = game.replayed
-    ? `Played on from move ${count(game.replayedFrom)}`
+    `Score: ${abbreviate(game.score)}${game.replayed ? "*" : ""}  |  Best: ${best}`;
+  // The line trades exact digits for width, so the exact score is put back on hover.
+  // What the asterisk is short for rides along beside it: the move it names is the one
+  // thing the mark itself cannot say, and the line has no room to say it either.
+  const replayedNote = game.replayed
+    ? ` (played on from move ${count(game.replayedFrom)})`
     : "";
+  elements.scoreLine.title = `Score: ${count(game.score)}${replayedNote}  |  Best: ${count(game.best)}`;
 }
 
 // Refused while the past is on screen, since a move can only be made from the latest
