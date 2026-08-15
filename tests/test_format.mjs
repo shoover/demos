@@ -44,18 +44,19 @@ test("abbreviate never grows longer once a unit is reached", () => {
 });
 
 for (const [seconds, expected] of [
-  [0, "0s"],
-  [45, "45s"],
-  [59, "59s"],
-  [60, "1m"],
-  [184, "3.1m"],
-  [3540, "59m"],
-  [3550, "59.2m"],
-  [3599, "1h"], // carries up rather than reading as "60m"
-  [3600, "1h"],
-  [12345, "3.4h"],
-  [86399, "1d"], // carries up rather than reading as "24h"
-  [86400, "1d"],
+  [0, "0:00"],
+  [45, "0:45"],
+  [59, "0:59"],
+  [60, "1:00"],
+  [184, "3:04"],
+  [59.9, "0:59"], // fractional playSeconds floors, so this doesn't tick over to 1:00 early
+  [90.6, "1:30"],
+  [3540, "59:00"],
+  [3599, "59:59"],
+  [3600, "1:00:00"], // the hour appears once there is one, not as a leading "0:"
+  [12345, "3:25:45"],
+  [86399, "23:59:59"],
+  [86400, "24:00:00"], // hours keep counting up rather than rolling over into days
 ]) {
   test(`formatDuration(${seconds}) is "${expected}"`, () => {
     assert.equal(formatDuration(seconds), expected);
