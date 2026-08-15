@@ -10,8 +10,9 @@
  * index (r * SIZE + c), because callers only ever use those to key tiles and look up
  * positions.
  *
- * A game keeps every state it has been in, so an earlier board can be looked at again;
- * see the Game class for how the timeline and the cursor into it fit together.
+ * A game keeps every state it has been in, so an earlier board can be looked at again --
+ * and played on from, which discards what it had already gone on to do; see the Game
+ * class for how the timeline and the cursor into it fit together.
  */
 
 export const SIZE = 4;
@@ -276,13 +277,15 @@ function savedStates(state) {
 /**
  * Parse and validate a stored save. Throws SaveError on anything unusable.
  *
- * `best` is the persisted best score, which bounds every saved score: a save claiming
- * more points than the best score ever recorded is inconsistent with itself.
+ * The persisted best scores bound every saved score: a save claiming more points than
+ * was ever recorded is inconsistent with itself. Which of the two bounds it is measured
+ * against is the save's own business, since the save says whether it was replayed.
  *
- * Returns the whole timeline and which of its states was being viewed, since the scrub
- * position is part of what a reload has to put back.
+ * Returns the whole timeline, which of its states was being viewed, and where play was
+ * last resumed from -- the scrub position and the replay point are both part of what a
+ * reload has to put back.
  */
-export function decodeSavedState(serialized, best) {
+export function decodeSavedState(serialized, { best, replayedBest }) {
   let state;
   try {
     state = JSON.parse(serialized);
@@ -304,9 +307,28 @@ export function decodeSavedState(serialized, best) {
     );
   }
 
+  // Absent as well as null: every save of a game that has been played straight through,
+  // and every save written before play could be resumed from an earlier state at all.
+  const replayedFrom = state.replayed_from ?? null;
+  if (replayedFrom !== null) {
+    requireNonNegativeInt(replayedFrom, "replay point");
+  }
+
+  // Each game is bounded by the track it was scoring into. A replayed one is bounded by
+  // its own track over its whole length, earliest states included, because the clean
+  // best crossed over at the fork and had already bounded everything before it.
   const timeline = [];
   for (const entry of savedStates(state)) {
-    timeline.push(decodeState(entry, best, timeline.at(-1) ?? null));
+    timeline.push(
+      decodeState(entry, replayedFrom === null ? best : replayedBest, timeline.at(-1) ?? null)
+    );
+  }
+
+  const latestMoves = timeline[timeline.length - 1].moves;
+  if (replayedFrom !== null && replayedFrom > latestMoves) {
+    throw new SaveError(
+      `Saved 2048 replay point ${replayedFrom} is past move ${latestMoves}`
+    );
   }
 
   const cursor =
@@ -319,24 +341,31 @@ export function decodeSavedState(serialized, best) {
     );
   }
 
-  return { timeline, cursor, playSeconds };
+  return { timeline, cursor, playSeconds, replayedFrom };
 }
 
 /**
  * The board and its rules. Knows nothing about how it is drawn or stored.
  *
- * `best` is carried here because it is a function of the score, but persisting it is
- * the caller's job: every move reports whether the best score changed.
+ * The best scores are carried here because they are a function of the score, but
+ * persisting them is the caller's job: every move reports whether one changed.
  *
  * Every state the game has been in is kept, oldest first, in `timeline`; `cells` and
  * the counters beside it are always the state at `cursor`. Seeking moves the cursor
- * back through the timeline to look at an earlier board; play only ever resumes from
- * the newest state, which is the one the cursor sits on until it is moved.
+ * back through the timeline to look at an earlier board. Play resumes from the newest
+ * state, and from any other only by way of playFrom, which makes the state it resumes
+ * at the newest one by discarding what came after it.
  */
 export class Game {
-  constructor({ best = 0, random = Math.random } = {}) {
+  constructor({ best = 0, replayedBest = 0, random = Math.random } = {}) {
     this.random = random;
     this.best = requireNonNegativeInt(best, "best score");
+    this.replayedBest = requireNonNegativeInt(replayedBest, "replayed best score");
+    // The move count play was last resumed at, or null for a game played straight
+    // through. A move count rather than a timeline position, because positions shift
+    // when the oldest states are trimmed and this has to still name the same move --
+    // and because naming the move is what it is for.
+    this.replayedFrom = null;
     this.cells = Game.emptyBoard();
     this.score = 0;
     this.moves = 0;
@@ -350,6 +379,33 @@ export class Game {
   /** Whether the state on screen is the newest one -- the only one that can be played. */
   get atLatest() {
     return this.cursor === this.timeline.length - 1;
+  }
+
+  /** Whether this game has been played on from an earlier state. */
+  get replayed() {
+    return this.replayedFrom !== null;
+  }
+
+  /**
+   * The best score this game is measured against: the replayed track once it has been
+   * played on from an earlier state, the clean track until then.
+   *
+   * Two tracks rather than one because the game rerolls its spawns. Replaying a move
+   * deals a different tile, so an unlucky one can simply be taken back, and a score
+   * reached that way is not the achievement a straight playthrough is. One figure would
+   * quietly let the first stand in for the second.
+   */
+  get ownBest() {
+    return this.replayed ? this.replayedBest : this.best;
+  }
+
+  /** Raise this game's own track. Which one that is, only the game knows. */
+  setOwnBest(score) {
+    if (this.replayed) {
+      this.replayedBest = score;
+    } else {
+      this.best = score;
+    }
   }
 
   get latest() {
@@ -411,6 +467,9 @@ export class Game {
     this.score = 0;
     this.moves = 0;
     this.gameOver = false;
+    // A fresh game is a clean one however the last was played: what was replayed was
+    // that game's history, and this one has none yet.
+    this.replayedFrom = null;
     const spawned = [this.spawnTile(), this.spawnTile()];
     // A new game is a new timeline: the old one belonged to a game that is over.
     this.timeline = [captureState(this)];
@@ -447,6 +506,41 @@ export class Game {
     this.moves = state.moves;
     this.gameOver = state.gameOver;
     return this.cursor;
+  }
+
+  /**
+   * Resume play from the state at `index`, discarding everything after it. Returns how
+   * many states that was; zero means the newest state was already the one asked for and
+   * nothing happened.
+   *
+   * Truncating rather than branching is what keeps this cheap. A prefix of a timeline is
+   * a timeline -- its states are still one move apart and its scores still run forward,
+   * which is exactly what the save validator checks -- so playing on appends to a
+   * shorter history rather than opening a second one, and move() needs no changes at
+   * all: the cursor is at the newest state again, so its guard simply stops firing.
+   *
+   * What that costs is the discarded moves, which are gone from the next save. What it
+   * buys is one timeline, one scrubber axis, and one save format.
+   *
+   * Undo is this and nothing else -- playFrom(cursor - 1) -- which is why there is no
+   * separate stack of moves to unwind: the history already is one.
+   */
+  playFrom(index) {
+    const landed = this.seek(index);
+    const discarded = this.timeline.length - 1 - landed;
+    if (discarded === 0) {
+      return 0;
+    }
+
+    this.timeline.length = landed + 1;
+    // The clean best comes across rather than being left behind: those points were
+    // really scored, before this game had rewritten anything, so taking a move back must
+    // not cost a total that had actually been reached. It also puts the replayed track
+    // above every score in the timeline at the moment of the fork, which is what lets
+    // the whole of a replayed save be measured against that one track.
+    this.replayedBest = Math.max(this.replayedBest, this.best);
+    this.replayedFrom = this.moves;
+    return discarded;
   }
 
   /**
@@ -503,9 +597,9 @@ export class Game {
     }
 
     this.score += gained;
-    const bestChanged = this.score > this.best;
+    const bestChanged = this.score > this.ownBest;
     if (bestChanged) {
-      this.best = this.score;
+      this.setOwnBest(this.score);
     }
     this.moves += 1;
     const spawnedCell = this.spawnTile();
@@ -516,6 +610,7 @@ export class Game {
 
   restore(saved) {
     this.timeline = saved.timeline.map((state) => captureState(state, state.direction));
+    this.replayedFrom = saved.replayedFrom ?? null;
     this.seek(saved.cursor);
   }
 
@@ -531,6 +626,10 @@ export class Game {
         direction: state.direction,
       })),
       cursor: this.cursor,
+      // Added to the format rather than versioned into it: a reader that does not know
+      // the field ignores it and still opens the game, which is what an older build
+      // deployed elsewhere would otherwise be unable to do.
+      replayed_from: this.replayedFrom,
       play_seconds: playSeconds,
     });
   }

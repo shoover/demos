@@ -6,6 +6,11 @@
 import { SIZE, Game, SaveError, decodeSavedState } from "./board.js";
 
 const BEST_SCORE_KEY = "vanilla-2048.bestScore";
+// The best score reached in a game that was played on from an earlier state. A separate
+// key rather than a second field beside the first, so the scores already stored under
+// that one keep the meaning they were written with: every one of them was reached before
+// a game could rewrite its own history, which is exactly what the clean track holds.
+const BEST_REPLAYED_SCORE_KEY = "vanilla-2048.bestReplayedScore";
 const GAME_STATE_KEY = "vanilla-2048.gameState.v1";
 
 const SLIDE_MS = 100;
@@ -67,12 +72,14 @@ const elements = {
   tiles: document.getElementById("tiles"),
   overlay: document.getElementById("overlay"),
   nextMove: document.getElementById("next-move"),
+  undo: document.getElementById("undo"),
   timeTravel: document.getElementById("time-travel"),
   timeline: document.getElementById("timeline"),
   scrubber: document.getElementById("scrubber"),
   stepBack: document.getElementById("step-back"),
   stepForward: document.getElementById("step-forward"),
   latest: document.getElementById("latest"),
+  playFromHere: document.getElementById("play-from-here"),
   timelineLabel: document.getElementById("timeline-label"),
 };
 
@@ -114,8 +121,8 @@ const storage = (() => {
   }
 })();
 
-function loadBestScore() {
-  const value = storage.getItem(BEST_SCORE_KEY);
+function loadBestScore(key) {
+  const value = storage.getItem(key);
   if (value === null) {
     return 0;
   }
@@ -125,8 +132,17 @@ function loadBestScore() {
   return Number(value);
 }
 
-function saveBestScore(value) {
-  storage.setItem(BEST_SCORE_KEY, String(value));
+/**
+ * Write down the best score the game has just raised.
+ *
+ * Which of the two that is, the game knows and this does not have to: a game scores into
+ * one track or the other, never both, so there is only ever one key to write.
+ */
+function saveBestScore() {
+  storage.setItem(
+    game.replayed ? BEST_REPLAYED_SCORE_KEY : BEST_SCORE_KEY,
+    String(game.ownBest)
+  );
 }
 
 /* Play time ---------------------------------------------------------------- */
@@ -163,6 +179,17 @@ const playTime = {
 };
 
 document.addEventListener("visibilitychange", () => playTime.sync());
+
+/**
+ * Whether the clock should be running for the game as it now stands.
+ *
+ * Asked of the newest state rather than of the state on screen, because the clock
+ * belongs to the game and not to the board being looked at: it runs whenever the game
+ * is under way, however far back the scrubber has been left.
+ */
+function clockRuns() {
+  return game.latest.moves > 0 && !game.latest.gameOver;
+}
 
 /* Saving ------------------------------------------------------------------- */
 
@@ -424,11 +451,30 @@ function paintSliding(slidingTiles) {
   }));
 }
 
-// No move count here: the scrubber's own label shares this line and carries it, against
-// the total the game has reached, which is more than this half ever said.
+/**
+ * What the state on screen is worth, and what has ever been reached.
+ *
+ * No move count here: the scrubber's own label shares this line and carries it, against
+ * the total the game has reached, which is more than this half ever said.
+ *
+ * An asterisk is the whole of what marks a game that has been played on from an earlier
+ * state, and there is deliberately no counterpart on a clean one: a score with nothing
+ * beside it is a score, which is what it was before any of this existed. The best line
+ * carries the replayed track in brackets after the clean one, and carries it only once
+ * there is one -- a player who has never taken a move back never sees a bracket.
+ */
 function paintScore() {
+  const best =
+    game.replayedBest > 0
+      ? `${count(game.best)} (${count(game.replayedBest)}*)`
+      : count(game.best);
   elements.score.textContent =
-    `Score: ${count(game.score)}  |  Best: ${count(game.best)}`;
+    `Score: ${count(game.score)}${game.replayed ? "*" : ""}  |  Best: ${best}`;
+  // What the asterisk is short for. The move it names is the one thing the mark itself
+  // cannot say, and the line has no room to say it in.
+  elements.score.title = game.replayed
+    ? `Played on from move ${count(game.replayedFrom)}`
+    : "";
 }
 
 // Refused while the past is on screen, since a move can only be made from the latest
@@ -457,6 +503,10 @@ function paintTimeline() {
   elements.stepBack.disabled = game.cursor === 0;
   elements.stepForward.disabled = game.atLatest;
   elements.latest.disabled = game.atLatest;
+  elements.playFromHere.disabled = game.atLatest;
+  // Off while the past is on screen, and off on an opening board, which has no move
+  // behind it to take back.
+  elements.undo.disabled = !game.atLatest || game.cursor === 0;
   // Two different readings, so two different words for them. At the latest state the
   // number is how many moves have been played, and reads as a total; scrubbed back it is
   // which move is on screen, one of a set, and needs that set beside it to mean anything.
@@ -604,6 +654,30 @@ function paintHelp() {
   elements.help.textContent = message || instructions();
 }
 
+/**
+ * Draw everything that reports the state the game is now in: the board, and the panel
+ * lines that say what it is worth, where it sits, and what there is to say about it.
+ *
+ * `burst` is how the board arrived, in paintSettled's terms; left off, it is drawn at
+ * rest. Every path that changes which state is on screen ends here, so none of them can
+ * repaint three quarters of the page and leave the fourth saying something else.
+ */
+function repaint(burst, prefix = "") {
+  paintSettled(burst);
+  paintPanel(prefix);
+}
+
+/**
+ * The panel lines alone, for the one caller that must not touch the board: a move paints
+ * the tiles where they started and walks them over, so repainting the board here would
+ * drop them on their destinations a slide early.
+ */
+function paintPanel(prefix = "") {
+  paintScore();
+  paintTimeline();
+  paintMessage(prefix);
+}
+
 /* Sizing ------------------------------------------------------------------- */
 
 /**
@@ -704,20 +778,37 @@ function landSlide() {
   settle();
 }
 
+/**
+ * Write down what a change to the live game leaves behind: the clock's reading, the best
+ * score if it moved, and the game itself.
+ *
+ * The clock is read before it is set, so the seconds stored are the ones the change
+ * happened at rather than a fresh zero, and whether it keeps running is asked of the
+ * game rather than assumed: the same call has to start it on the first move and stop it
+ * on the last.
+ */
+function commitChange(bestChanged = false) {
+  const playSeconds = playTime.elapsed();
+  playTime.set(playSeconds, clockRuns());
+  if (bestChanged) {
+    saveBestScore();
+  }
+  saver.save(game, playSeconds);
+}
+
 function startNewGame() {
   const spawned = game.reset();
   slide = null;
   lastMoveAt = -Infinity;
   // Every control in it is about to be disabled: a new game has nowhere to scrub to.
   setTimelineOpen(false);
-  paintSettled({ appeared: new Set(spawned) });
-  paintScore();
-  paintTimeline();
   // Just the news: the line it is standing in already says how to play, and saying it
   // again in fewer words would be the one thing this message costs.
-  setMessage("New game.");
+  repaint({ appeared: new Set(spawned) }, "New game.");
+  // The clock starts over with the board rather than carrying the last game's seconds
+  // across; commitChange picks the zero straight back up.
   playTime.set(0, false);
-  saver.save(game, 0);
+  commitChange();
 }
 
 /**
@@ -743,10 +834,35 @@ function showState(index) {
   }
   landSlide();
   game.seek(index);
-  paintSettled(game.arrival);
-  paintScore();
-  paintTimeline();
-  paintMessage();
+  repaint(game.arrival);
+}
+
+/**
+ * Take up the game again from the state at `index`, dropping what it had gone on to do.
+ *
+ * Nothing here has to turn play back on: the board un-dims and the d-pad comes back by
+ * themselves, because everything that was refusing input was reading atLatest, and the
+ * state resumed at has just become the newest one.
+ *
+ * The board bursts as it would have when the move that reached it was played, which is
+ * how every other landing on a state is drawn -- and here it is also the only thing on
+ * screen that moves, since the tiles are already the ones being resumed from.
+ *
+ * `describe` is called after the fact, so it reads the game as it now stands.
+ */
+function playFrom(index, describe) {
+  if (!acceptingInput) {
+    return;
+  }
+  landSlide();
+  const discarded = game.playFrom(index);
+  if (discarded === 0) {
+    return;
+  }
+  repaint(game.arrival, describe(discarded));
+  // Always, rather than on a reported change: the fork is what carried the clean best
+  // across to the replayed track, and that is a write whether or not it moved a number.
+  commitChange(true);
 }
 
 function applyMove(direction) {
@@ -771,15 +887,8 @@ function applyMove(direction) {
     })
   );
 
-  paintScore();
-  paintTimeline();
-  paintMessage();
-  const playSeconds = playTime.elapsed();
-  playTime.set(playSeconds, !game.gameOver);
-  if (result.bestChanged) {
-    saveBestScore(game.best);
-  }
-  saver.save(game, playSeconds);
+  paintPanel();
+  commitChange(result.bestChanged);
 }
 
 /* Input -------------------------------------------------------------------- */
@@ -966,6 +1075,13 @@ function onPress(button, press) {
 for (const direction of ["up", "down", "left", "right"]) {
   onPress(document.getElementById(direction), () => applyMove(direction));
 }
+// Pressed over and over as ordinary use -- back, and back again -- so it is wired like a
+// d-pad arrow rather than like New Game, for the reason onPress gives.
+onPress(elements.undo, () =>
+  // The move taken back is the one after the state left on screen, which is the move
+  // count as it now stands plus one.
+  playFrom(game.cursor - 1, () => `Move ${count(game.moves + 1)} taken back.`)
+);
 onPress(elements.stepBack, () => showState(game.cursor - 1));
 onPress(elements.stepForward, () => showState(game.cursor + 1));
 onPress(elements.timeTravel, () => {
@@ -976,6 +1092,16 @@ onPress(elements.timeTravel, () => {
   }
 });
 elements.latest.addEventListener("click", () => showState(game.timeline.length - 1));
+elements.playFromHere.addEventListener("click", () => {
+  playFrom(
+    game.cursor,
+    (discarded) =>
+      `Playing on from move ${count(game.moves)}. ${count(discarded)} discarded.`
+  );
+  // Not closeTimeline, which puts the newest state back on the board: the state on
+  // screen has just become the newest one, and going back to playing is the point.
+  setTimelineOpen(false);
+});
 elements.scrubber.addEventListener("input", () =>
   showState(Number(elements.scrubber.value))
 );
@@ -1117,10 +1243,17 @@ async function share() {
 
   const filename = `2048-score-${game.score}.png`;
   const file = new File([blob], filename, { type: "image/png" });
+  // The image carries the asterisk on its own, since it is drawn from the score line as
+  // it stands. This sentence is built here rather than read off the page, so it is the
+  // one place the mark has to be repeated by hand.
+  const replayed = game.replayed
+    ? `, played on from move ${count(game.replayedFrom)}`
+    : "";
   const payload = {
     files: [file],
     title: "2048",
-    text: `2048: ${count(game.score)} points in ${count(game.moves)} moves.`,
+    text:
+      `2048: ${count(game.score)} points in ${count(game.moves)} moves${replayed}.`,
   };
   if (navigator.canShare && navigator.canShare(payload)) {
     await navigator.share(payload);
@@ -1158,15 +1291,17 @@ function reportCorruptState(reason) {
   const detail = document.createElement("small");
   detail.textContent = reason;
   const consequence = document.createElement("small");
-  consequence.textContent = "Starting fresh discards the saved game and the best score.";
+  consequence.textContent = "Starting fresh discards the saved game and the best scores.";
   const button = document.createElement("button");
   button.type = "button";
   button.textContent = "Start fresh";
   button.addEventListener("click", () => {
-    // Both keys: the saved score is validated against the best score, so clearing one
-    // and keeping the other is how this state is reached.
+    // All of them: the saved score is validated against whichever best score its game
+    // was scoring into, so clearing one and keeping the others is how this state is
+    // reached in the first place.
     storage.removeItem(GAME_STATE_KEY);
     storage.removeItem(BEST_SCORE_KEY);
+    storage.removeItem(BEST_REPLAYED_SCORE_KEY);
     location.reload();
   });
 
@@ -1190,16 +1325,20 @@ function reportCorruptState(reason) {
 let game = new Game();
 
 function restoreGame() {
-  game = new Game({ best: loadBestScore() });
+  game = new Game({
+    best: loadBestScore(BEST_SCORE_KEY),
+    replayedBest: loadBestScore(BEST_REPLAYED_SCORE_KEY),
+  });
   const serialized = storage.getItem(GAME_STATE_KEY);
   if (serialized === null) {
     return false;
   }
-  const saved = decodeSavedState(serialized, game.best);
+  const saved = decodeSavedState(serialized, {
+    best: game.best,
+    replayedBest: game.replayedBest,
+  });
   game.restore(saved);
-  // The clock belongs to the game, not to the state being looked at: it runs whenever
-  // the newest state is a game under way, however far back the scrubber was left.
-  playTime.set(saved.playSeconds, game.latest.moves > 0 && !game.latest.gameOver);
+  playTime.set(saved.playSeconds, clockRuns());
   return true;
 }
 
@@ -1217,12 +1356,18 @@ function start() {
   }
 
   if (restored) {
-    paintMessage("Saved game restored.");
-    paintScore();
-    paintTimeline();
     // At rest, unlike a state scrubbed to: reopening a save is not a move arriving,
     // however far back the state it opens on sits.
-    paintSettled();
+    //
+    // A replayed game says so on the way in. The asterisk it reopens with is a mark
+    // whose meaning has to be learned; the sentence beside it, once, is where it can be
+    // learned from -- and the move it names is the one thing the mark cannot carry.
+    repaint(
+      undefined,
+      game.replayed
+        ? `Saved game restored, replayed from move ${count(game.replayedFrom)}.`
+        : "Saved game restored."
+    );
     saver.defer();
   } else {
     startNewGame();

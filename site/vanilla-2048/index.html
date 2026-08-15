@@ -388,7 +388,7 @@
     /* Tapped twice in a row as ordinary use -- stepping back and back, opening the
        popup and closing it -- exactly like a d-pad arrow, so they need the same
        defence against a phone reading two taps as a zoom. */
-    #step-back, #step-forward, #time-travel { touch-action: none; }
+    #step-back, #step-forward, #time-travel, #undo { touch-action: none; }
 
     /* Viewing the past: the board is drawn back from the live one, so the state on
        screen never has to be read from the label alone. */
@@ -519,6 +519,14 @@
            going back through it. -->
       <div id="actions">
         <button id="new-game" type="button">New Game</button>
+        <!-- The last move, taken back. Up here rather than in the popup because taking
+             one move back is part of playing, while walking the history is not; what it
+             does under the covers is the popup's own truncation, one state along.
+
+             Disabled while an earlier state is on screen, so it always means the same
+             thing and always costs the same: one move, the newest one. Reaching back
+             further is what the popup is for, and the popup says what that costs. -->
+        <button id="undo" type="button" title="Take back the last move" disabled>Undo</button>
         <button id="share" type="button">Share</button>
         <button
           id="time-travel"
@@ -555,7 +563,17 @@
             aria-label="Move history"
             disabled
           />
+          <!-- The two ends of the same decision, and disabled in opposite conditions:
+               one goes back to where the game had got to, the other makes this state
+               where it has got to. Both are pointless on the newest state, which is why
+               only one of them can ever be pressed. -->
           <button id="latest" type="button" disabled>Latest</button>
+          <button
+            id="play-from-here"
+            type="button"
+            title="Resume play here, discarding the moves after this one"
+            disabled
+          >Play from here</button>
         </div>
       </div>
       <!-- How to play, and where the game says its piece: a message stands in for the
