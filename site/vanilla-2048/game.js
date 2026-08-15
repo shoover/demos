@@ -603,8 +603,12 @@ function stepIndicator(now) {
 
 // Up on the score line rather than down among the readings: it is what the game has got
 // to, like the score and the move beside it, and not a measurement of the page.
+//
+// "Time" rather than "Play time", which is what it is called everywhere it is discussed:
+// the label sits third of four on a line that was already wrapping on a phone, and what
+// a clock in seconds beside a score is measuring is not in much doubt.
 function paintPlayTime(playSeconds) {
-  elements.playTimeLabel.textContent = `Play time: ${playSeconds.toFixed(0)}s`;
+  elements.playTimeLabel.textContent = `Time: ${playSeconds.toFixed(0)}s`;
 }
 
 function paintStats() {
