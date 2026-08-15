@@ -27,6 +27,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+      - name: Bust JS module caches
+        run: python3 scripts/stamp-asset-versions.py "$GITHUB_SHA"
       - name: Setup Pages
         uses: actions/configure-pages@v6
       - name: Upload artifact
