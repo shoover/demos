@@ -6,6 +6,11 @@
 import { SIZE, Game, SaveError, decodeSavedState } from "./board.js";
 
 const BEST_SCORE_KEY = "vanilla-2048.bestScore";
+// The best score reached in a game that was played on from an earlier state. A separate
+// key rather than a second field beside the first, so the scores already stored under
+// that one keep the meaning they were written with: every one of them was reached before
+// a game could rewrite its own history, which is exactly what the clean track holds.
+const BEST_REPLAYED_SCORE_KEY = "vanilla-2048.bestReplayedScore";
 const GAME_STATE_KEY = "vanilla-2048.gameState.v1";
 
 const SLIDE_MS = 100;
@@ -108,8 +113,8 @@ const storage = (() => {
   }
 })();
 
-function loadBestScore() {
-  const value = storage.getItem(BEST_SCORE_KEY);
+function loadBestScore(key) {
+  const value = storage.getItem(key);
   if (value === null) {
     return 0;
   }
@@ -119,8 +124,17 @@ function loadBestScore() {
   return Number(value);
 }
 
-function saveBestScore(value) {
-  storage.setItem(BEST_SCORE_KEY, String(value));
+/**
+ * Write down the best score the game has just raised.
+ *
+ * Which of the two that is, the game knows and this does not have to: a game scores into
+ * one track or the other, never both, so there is only ever one key to write.
+ */
+function saveBestScore() {
+  storage.setItem(
+    game.replayed ? BEST_REPLAYED_SCORE_KEY : BEST_SCORE_KEY,
+    String(game.ownBest)
+  );
 }
 
 /* Play time ---------------------------------------------------------------- */
@@ -690,7 +704,7 @@ function commitChange(bestChanged = false) {
   const playSeconds = playTime.elapsed();
   playTime.set(playSeconds, clockRuns());
   if (bestChanged) {
-    saveBestScore(game.best);
+    saveBestScore();
   }
   saver.save(game, playSeconds);
 }
@@ -1138,15 +1152,17 @@ function reportCorruptState(reason) {
   const detail = document.createElement("small");
   detail.textContent = reason;
   const consequence = document.createElement("small");
-  consequence.textContent = "Starting fresh discards the saved game and the best score.";
+  consequence.textContent = "Starting fresh discards the saved game and the best scores.";
   const button = document.createElement("button");
   button.type = "button";
   button.textContent = "Start fresh";
   button.addEventListener("click", () => {
-    // Both keys: the saved score is validated against the best score, so clearing one
-    // and keeping the other is how this state is reached.
+    // All of them: the saved score is validated against whichever best score its game
+    // was scoring into, so clearing one and keeping the others is how this state is
+    // reached in the first place.
     storage.removeItem(GAME_STATE_KEY);
     storage.removeItem(BEST_SCORE_KEY);
+    storage.removeItem(BEST_REPLAYED_SCORE_KEY);
     location.reload();
   });
 
@@ -1170,12 +1186,18 @@ function reportCorruptState(reason) {
 let game = new Game();
 
 function restoreGame() {
-  game = new Game({ best: loadBestScore() });
+  game = new Game({
+    best: loadBestScore(BEST_SCORE_KEY),
+    replayedBest: loadBestScore(BEST_REPLAYED_SCORE_KEY),
+  });
   const serialized = storage.getItem(GAME_STATE_KEY);
   if (serialized === null) {
     return false;
   }
-  const saved = decodeSavedState(serialized, game.best);
+  const saved = decodeSavedState(serialized, {
+    best: game.best,
+    replayedBest: game.replayedBest,
+  });
   game.restore(saved);
   playTime.set(saved.playSeconds, clockRuns());
   return true;

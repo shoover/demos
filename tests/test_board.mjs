@@ -25,6 +25,12 @@ import {
 
 const HUGE_BEST = 10 ** 9;
 
+/** Best scores that bound anything, for the cases that are not about the bounds. */
+const BESTS = { best: HUGE_BEST, replayedBest: HUGE_BEST };
+
+/** The bounds a game's own save has to be read back against. */
+const bestsOf = (game) => ({ best: game.best, replayedBest: game.replayedBest });
+
 /** Spawns the first empty cell in row-major order, always a 2. */
 const fixedRandom = () => 0;
 
@@ -349,7 +355,7 @@ test("what a state arrived with is worked out again rather than stored", () => {
 
   // Through the save format, which carries boards and directions and nothing else.
   const restored = newGame();
-  restored.restore(decodeSavedState(played.encode(1), played.best));
+  restored.restore(decodeSavedState(played.encode(1), bestsOf(played)));
   const sorted = (cells) => [...cells].sort((a, b) => a - b);
   results.forEach((result, index) => {
     assert.notEqual(result, null);
@@ -431,6 +437,151 @@ test("the timeline drops its oldest states rather than growing without limit", (
   assert.equal(game.timeline[0].moves, game.moves - (TIMELINE_LIMIT - 1));
 });
 
+/* Playing on from an earlier state ------------------------------------------- */
+
+/**
+ * A game four moves deep, with the cursor left on the state after move two.
+ *
+ * Best starts at zero rather than out of reach, so the two tracks actually move as it
+ * is played and can be read back afterwards.
+ */
+function replayable() {
+  const game = newGame(null, 0);
+  game.reset();
+  for (const direction of ["left", "down", "right", "up"]) {
+    game.move(direction);
+  }
+  game.seek(2);
+  return game;
+}
+
+test("playing on from a state discards what the game had gone on to do", () => {
+  const game = replayable();
+  const board = game.cells.map((row) => row.slice());
+
+  assert.equal(game.playFrom(2), 2);
+  assert.equal(game.timeline.length, 3);
+  assert.equal(game.atLatest, true);
+  assert.equal(game.moves, 2);
+  // The board is the one that was being looked at, not the one play had reached.
+  assert.deepEqual(game.cells, board);
+  assert.deepEqual(game.latest.cells, board);
+});
+
+test("a move played on from an earlier state extends the shortened history", () => {
+  const game = replayable();
+  game.playFrom(2);
+  assert.notEqual(game.move("right"), null);
+
+  assert.equal(game.timeline.length, 4);
+  assert.equal(game.moves, 3);
+  // Still one move apart and still running forward, which is all the save format asks.
+  game.timeline.forEach((state, index) => {
+    assert.equal(state.moves, index + game.timeline[0].moves);
+  });
+});
+
+test("playing on from the newest state changes nothing", () => {
+  const game = replayable();
+  game.seek(4);
+  assert.equal(game.playFrom(4), 0);
+  assert.equal(game.timeline.length, 5);
+  // And the game is not marked as replayed for a fork that never happened.
+  assert.equal(game.replayed, false);
+  assert.equal(game.replayedFrom, null);
+});
+
+test("a game remembers the move it was played on from", () => {
+  const game = replayable();
+  assert.equal(game.replayed, false);
+  game.playFrom(2);
+  assert.equal(game.replayed, true);
+  assert.equal(game.replayedFrom, 2);
+
+  // The most recent fork, not the first: it is what a reopened save has to describe.
+  game.move("left");
+  game.playFrom(1);
+  assert.equal(game.replayedFrom, 1);
+});
+
+test("a new game is clean however the last one was played", () => {
+  const game = replayable();
+  game.playFrom(2);
+  game.reset();
+  assert.equal(game.replayed, false);
+  assert.equal(game.replayedFrom, null);
+});
+
+test("taking back the losing move puts the game back in play", () => {
+  const game = newGame([
+    [2, 4, 2, 4],
+    [4, 2, 4, 2],
+    [2, 4, 2, 4],
+    [0, 4, 2, 4],
+  ]);
+  assert.notEqual(game.move("left"), null);
+  assert.equal(game.gameOver, true);
+
+  game.playFrom(game.cursor - 1);
+  assert.equal(game.gameOver, false);
+  assert.notEqual(game.move("left"), null);
+});
+
+test("undo is playing on from the state before this one", () => {
+  const game = replayable();
+  game.seek(4);
+  assert.equal(game.playFrom(game.cursor - 1), 1);
+  assert.equal(game.timeline.length, 4);
+  assert.equal(game.atLatest, true);
+});
+
+/* Best scores ----------------------------------------------------------------- */
+
+test("a clean game scores into the clean best", () => {
+  const game = newGame(null, 0);
+  game.reset();
+  game.move("left");
+  assert.equal(game.best, game.score);
+  assert.equal(game.replayedBest, 0);
+});
+
+test("the best score reached before a fork carries across to the replayed track", () => {
+  const game = replayable();
+  const reached = game.best;
+  assert.ok(reached > 0);
+
+  game.playFrom(2);
+  // The points were really scored, before anything was rewritten: taking a move back
+  // does not cost a total that had actually been reached.
+  assert.equal(game.replayedBest, reached);
+  assert.equal(game.best, reached);
+});
+
+test("a replayed game scores into the replayed best and leaves the clean one alone", () => {
+  const game = replayable();
+  const clean = game.best;
+  game.playFrom(2);
+  while (!game.gameOver && game.moves < 40) {
+    for (const direction of ["left", "down", "right", "up"]) {
+      game.move(direction);
+    }
+  }
+
+  assert.equal(game.best, clean);
+  assert.ok(game.replayedBest >= game.score);
+  assert.ok(game.replayedBest > clean);
+});
+
+test("neither best score falls when history is discarded", () => {
+  const game = replayable();
+  game.seek(4);
+  const [best, replayedBest] = [game.best, game.replayedBest];
+  game.playFrom(0);
+  assert.ok(game.score < best);
+  assert.equal(game.best, best);
+  assert.ok(game.replayedBest >= replayedBest);
+});
+
 /* Saving -------------------------------------------------------------------- */
 
 test("a round trip through the save format preserves the game", () => {
@@ -441,7 +592,7 @@ test("a round trip through the save format preserves the game", () => {
     [0, 0, 0, 0],
   ]);
   game.move("left");
-  const saved = decodeSavedState(game.encode(9.5), game.best);
+  const saved = decodeSavedState(game.encode(9.5), bestsOf(game));
   assert.equal(saved.timeline.length, game.timeline.length);
   assert.deepEqual(saved.timeline, game.timeline);
   assert.equal(saved.cursor, game.cursor);
@@ -457,7 +608,7 @@ test("a restored game comes back on the state it was left on", () => {
   played.seek(2);
 
   const restored = newGame();
-  restored.restore(decodeSavedState(played.encode(3), played.best));
+  restored.restore(decodeSavedState(played.encode(3), bestsOf(played)));
   assert.equal(restored.cursor, played.cursor);
   assert.deepEqual(restored.timeline, played.timeline);
   assert.equal(restored.nextDirection, played.nextDirection);
@@ -468,7 +619,7 @@ test("a restored game comes back on the state it was left on", () => {
 });
 
 test("an interrupted write is rejected rather than half-read", () => {
-  assert.throws(() => decodeSavedState(encoded().slice(0, 20), HUGE_BEST), SaveError);
+  assert.throws(() => decodeSavedState(encoded().slice(0, 20), BESTS), SaveError);
 });
 
 for (const [name, overrides] of [
@@ -484,7 +635,7 @@ for (const [name, overrides] of [
   ["a cursor past the end of the timeline", { cursor: 1 }],
 ]) {
   test(`${name} is rejected`, () => {
-    assert.throws(() => decodeSavedState(encoded(overrides), HUGE_BEST), SaveError);
+    assert.throws(() => decodeSavedState(encoded(overrides), BESTS), SaveError);
   });
 }
 
@@ -499,7 +650,7 @@ for (const [name, overrides] of [
 ]) {
   test(`a state with ${name} is rejected`, () => {
     assert.throws(
-      () => decodeSavedState(encoded({ timeline: [savedState(overrides)] }), HUGE_BEST),
+      () => decodeSavedState(encoded({ timeline: [savedState(overrides)] }), BESTS),
       SaveError
     );
   });
@@ -507,38 +658,88 @@ for (const [name, overrides] of [
 
 test("a timeline that does not run one move forward at a time is rejected", () => {
   const skips = [savedState(), savedState({ moves: 9, score: 120 })];
-  assert.throws(() => decodeSavedState(encoded({ timeline: skips }), HUGE_BEST), SaveError);
+  assert.throws(() => decodeSavedState(encoded({ timeline: skips }), BESTS), SaveError);
 
   const loses = [savedState(), savedState({ moves: 8, score: 99 })];
-  assert.throws(() => decodeSavedState(encoded({ timeline: loses }), HUGE_BEST), SaveError);
+  assert.throws(() => decodeSavedState(encoded({ timeline: loses }), BESTS), SaveError);
 
   const runs = [savedState(), savedState({ moves: 8, score: 120 })];
-  assert.doesNotThrow(() => decodeSavedState(encoded({ timeline: runs }), HUGE_BEST));
+  assert.doesNotThrow(() => decodeSavedState(encoded({ timeline: runs }), BESTS));
 });
 
 test("a score beyond the best score ever recorded is rejected", () => {
   const scored = (score) => encoded({ timeline: [savedState({ score })] });
-  assert.throws(() => decodeSavedState(scored(101), 100), SaveError);
-  assert.doesNotThrow(() => decodeSavedState(scored(100), 100));
+  const bests = { best: 100, replayedBest: 0 };
+  assert.throws(() => decodeSavedState(scored(101), bests), SaveError);
+  assert.doesNotThrow(() => decodeSavedState(scored(100), bests));
+});
+
+test("a replayed save is measured against the replayed best score", () => {
+  // The clean track cannot bound it -- a replayed game stops scoring into that one the
+  // moment it forks, so its own total is free to run past it.
+  const scored = (score) =>
+    encoded({ timeline: [savedState({ score })], replayed_from: 3 });
+  const bests = { best: 100, replayedBest: 500 };
+  assert.doesNotThrow(() => decodeSavedState(scored(400), bests));
+  assert.throws(() => decodeSavedState(scored(501), bests), SaveError);
 });
 
 test("a move direction that is not a direction is rejected", () => {
   const bogus = encoded({ timeline: [savedState({ direction: "sideways" })] });
-  assert.throws(() => decodeSavedState(bogus, HUGE_BEST), SaveError);
+  assert.throws(() => decodeSavedState(bogus, BESTS), SaveError);
 });
 
 test("a state saved without its move reads back with none", () => {
   // What a save written before moves were tracked holds, and what the oldest state of a
   // trimmed timeline holds: a state whose next move simply cannot be shown.
-  const saved = decodeSavedState(encoded(), HUGE_BEST);
+  const saved = decodeSavedState(encoded(), BESTS);
   assert.equal(saved.timeline[0].direction, null);
 
   const game = newGame();
   game.restore(saved);
   assert.equal(game.nextDirection, null);
   // And it survives a round trip rather than turning into something else.
-  assert.equal(decodeSavedState(game.encode(1), game.best).timeline[0].direction, null);
+  assert.equal(decodeSavedState(game.encode(1), bestsOf(game)).timeline[0].direction, null);
 });
+
+test("a replayed game comes back knowing which move it was played on from", () => {
+  const played = replayable();
+  played.playFrom(2);
+  played.move("right");
+
+  const restored = newGame();
+  restored.restore(decodeSavedState(played.encode(2), bestsOf(played)));
+  assert.equal(restored.replayedFrom, 2);
+  assert.equal(restored.replayed, true);
+  assert.deepEqual(restored.timeline, played.timeline);
+});
+
+test("a save with no replay point reads back as a clean playthrough", () => {
+  // What every save written before play could be resumed from an earlier state holds,
+  // and what a game played straight through holds now.
+  const saved = decodeSavedState(encoded(), BESTS);
+  assert.equal(saved.replayedFrom, null);
+
+  const game = newGame();
+  game.restore(saved);
+  assert.equal(game.replayed, false);
+  assert.equal(decodeSavedState(game.encode(1), bestsOf(game)).replayedFrom, null);
+});
+
+for (const [name, replayedFrom] of [
+  ["fractional", 1.5],
+  ["negative", -1],
+  ["past the newest move", 8],
+]) {
+  test(`a replay point that is ${name} is rejected`, () => {
+    // savedState() sits at move 7, so 8 is a game claiming to have resumed from a move
+    // it has not reached.
+    assert.throws(
+      () => decodeSavedState(encoded({ replayed_from: replayedFrom }), BESTS),
+      SaveError
+    );
+  });
+}
 
 test("a save from before time travel reads back as a one-state timeline", () => {
   // Version 1 kept the state at the top level and had no history to scrub.
@@ -547,7 +748,7 @@ test("a save from before time travel reads back as a one-state timeline", () => 
     ...savedState(),
     play_seconds: 4.5,
   });
-  const saved = decodeSavedState(legacy, HUGE_BEST);
+  const saved = decodeSavedState(legacy, BESTS);
   assert.equal(saved.timeline.length, 1);
   assert.equal(saved.cursor, 0);
   assert.equal(saved.timeline[0].moves, 7);
