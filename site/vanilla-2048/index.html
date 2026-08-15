@@ -125,13 +125,17 @@
       white-space: pre-wrap;
     }
 
-    /* The clock and the move counter, which close the score line. Fixed-width digits so
-       the line does not twitch as either rolls over -- the clock ticks four times a
-       second, so it would twitch the most -- and unbreakable so a wrap lands between
-       them and the score rather than inside "Move 128/512". */
+    /* Both halves of the header. Fixed-width digits so neither line twitches as its
+       numbers roll over -- the clock ticks four times a second, so it would twitch the
+       most -- and the two fields of the second line unbreakable, so if it ever has to
+       wrap it wraps between them rather than inside "Move 128/512". */
+    #score-line,
+    #progress-line {
+      font-variant-numeric: tabular-nums;
+    }
+
     #timeline-label,
     #play-time {
-      font-variant-numeric: tabular-nums;
       white-space: nowrap;
     }
 
@@ -507,14 +511,22 @@
 
   <main>
     <section id="panel">
-      <!-- Where the game has got to, on one line: the score, how long it has been played
-           for, and the move the board is on. The clock that walks back through those
-           moves stays below, with the rest of the controls.
+      <!-- Where the game has got to, on two lines: what it is worth, then how far it has
+           run. All four fields shared one line until a six-figure best with a replayed
+           one in brackets beside it pushed the move count onto a second by itself.
+
+           Two lines on purpose rather than one that sometimes wraps. The board is sized
+           from whatever the rest of the panel leaves over, measured at startup and again
+           when the play area resizes -- and a line growing a second row is neither of
+           those, so the board would keep a height the panel no longer has room for. A
+           line that is always two lines is measured as two.
 
            The move label goes last because it is the one that changes width mid-game:
            scrubbing swaps "Moves: 4" for "Move 4/12" and back on every drag, and with
-           nothing to its right there is nothing for that to shove around. -->
-      <p id="score-line"><span id="score">Score: 0  |  Best: 0</span>  |  <span id="play-time">Time: 0s</span>  |  <span id="timeline-label">Moves: 0</span></p>
+           nothing to its right there is nothing for that to shove around. The clock that
+           walks back through those moves stays below, with the rest of the controls. -->
+      <p id="score-line">Score: 0  |  Best: 0</p>
+      <p id="progress-line"><span id="play-time">Time: 0s</span>  |  <span id="timeline-label">Moves: 0</span></p>
       <!-- The game's own controls, and after them the clock that opens the ones for
            going back through it. -->
       <div id="actions">

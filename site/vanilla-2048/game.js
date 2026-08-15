@@ -62,7 +62,7 @@ const elements = {
   panel: document.getElementById("panel"),
   main: document.querySelector("main"),
   scoreLine: document.getElementById("score-line"),
-  score: document.getElementById("score"),
+  progressLine: document.getElementById("progress-line"),
   playTimeLabel: document.getElementById("play-time"),
   help: document.getElementById("help"),
   stats: document.getElementById("stats"),
@@ -454,8 +454,8 @@ function paintSliding(slidingTiles) {
 /**
  * What the state on screen is worth, and what has ever been reached.
  *
- * No move count here: the scrubber's own label shares this line and carries it, against
- * the total the game has reached, which is more than this half ever said.
+ * The whole of its line: the clock and the move count have their own below, which is
+ * what leaves this one room for a best score carrying a replayed one beside it.
  *
  * An asterisk is the whole of what marks a game that has been played on from an earlier
  * state, and there is deliberately no counterpart on a clean one: a score with nothing
@@ -468,11 +468,11 @@ function paintScore() {
     game.replayedBest > 0
       ? `${count(game.best)} (${count(game.replayedBest)}*)`
       : count(game.best);
-  elements.score.textContent =
+  elements.scoreLine.textContent =
     `Score: ${count(game.score)}${game.replayed ? "*" : ""}  |  Best: ${best}`;
   // What the asterisk is short for. The move it names is the one thing the mark itself
   // cannot say, and the line has no room to say it in.
-  elements.score.title = game.replayed
+  elements.scoreLine.title = game.replayed
     ? `Played on from move ${count(game.replayedFrom)}`
     : "";
 }
@@ -510,8 +510,8 @@ function paintTimeline() {
   // Two different readings, so two different words for them. At the latest state the
   // number is how many moves have been played, and reads as a total; scrubbed back it is
   // which move is on screen, one of a set, and needs that set beside it to mean anything.
-  // The label ends the score line, with nothing to its right, so the two forms can be as
-  // wide as they like: the line wraps before anything is pushed out of place.
+  // The label ends its line, with nothing to its right, so the two forms can be as wide
+  // as they like without pushing anything out of place.
   elements.timelineLabel.textContent = game.atLatest
     ? `Moves: ${count(game.moves)}`
     : `Move ${count(game.moves)}/${count(game.latest.moves)}`;
@@ -1182,8 +1182,12 @@ function drawShareBoard(context, x, y) {
 }
 
 /**
- * Draw the pieces worth sharing -- the score line, then the board with the stats and
- * whatever the game has to say under it -- so the buttons are left out.
+ * Draw the pieces worth sharing -- the two header lines, then the board with the stats
+ * and whatever the game has to say under it -- so the buttons are left out.
+ *
+ * Above and below are both lists, and the layout counts them rather than knowing how
+ * many there are, so the header growing a second line moved nothing here but the list
+ * it is named in.
  *
  * The message is taken from the game rather than off the line it shares with the
  * instructions, so an image made on a quiet board carries no line at all instead of a
@@ -1197,8 +1201,9 @@ function renderShareImage() {
   const panelStyle = getComputedStyle(elements.scoreLine);
   const font = `${panelStyle.fontSize} ${panelStyle.fontFamily}`;
   const lineHeight = Math.round(parseFloat(panelStyle.fontSize) * 1.5);
+  const aboveBoard = [elements.scoreLine.textContent, elements.progressLine.textContent];
   const belowBoard = [elements.stats.textContent, message].filter(Boolean);
-  const lines = [elements.scoreLine.textContent, ...belowBoard];
+  const lines = [...aboveBoard, ...belowBoard];
 
   const canvas = document.createElement("canvas");
   const context = canvas.getContext("2d");
@@ -1208,7 +1213,11 @@ function renderShareImage() {
     ...lines.map((line) => context.measureText(line).width)
   );
   const height =
-    lineHeight + SHARE_GAP + boardSize + SHARE_GAP + lineHeight * belowBoard.length;
+    lineHeight * aboveBoard.length +
+    SHARE_GAP +
+    boardSize +
+    SHARE_GAP +
+    lineHeight * belowBoard.length;
 
   canvas.width = (width + SHARE_PAD * 2) * SHARE_SCALE;
   canvas.height = (height + SHARE_PAD * 2) * SHARE_SCALE;
@@ -1225,8 +1234,11 @@ function renderShareImage() {
   };
 
   let y = SHARE_PAD;
-  text(lines[0], y);
-  y += lineHeight + SHARE_GAP;
+  for (const line of aboveBoard) {
+    text(line, y);
+    y += lineHeight;
+  }
+  y += SHARE_GAP;
   drawShareBoard(context, SHARE_PAD + (width - boardSize) / 2, y);
   y += boardSize + SHARE_GAP;
   for (const line of belowBoard) {
