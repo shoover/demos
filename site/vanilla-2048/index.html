@@ -125,12 +125,22 @@
       white-space: pre-wrap;
     }
 
-    /* The move counter, at the end of the score line. Fixed-width digits so the line
-       does not twitch as the count rolls over, and unbreakable so a wrap lands between
-       it and the score rather than inside "Move 128/512". */
-    #timeline-label {
+    /* The clock and the move counter, which close the score line. Fixed-width digits so
+       the line does not twitch as either rolls over -- the clock ticks four times a
+       second, so it would twitch the most -- and unbreakable so a wrap lands between
+       them and the score rather than inside "Move 128/512". */
+    #timeline-label,
+    #play-time {
       font-variant-numeric: tabular-nums;
       white-space: nowrap;
+    }
+
+    /* The readings line. Fixed-width digits for the same reason the score line has them,
+       and more need of it: the frame rate leads the line and is repainted four times a
+       second, so every field to its right moves with it -- and on a variable-refresh
+       display it wobbles a couple of Hz on its own, with nothing happening at all. */
+    #stats {
+      font-variant-numeric: tabular-nums;
     }
 
     /* No secondary text scale or colour inside the panel: imgui draws every line of
@@ -497,10 +507,14 @@
 
   <main>
     <section id="panel">
-      <!-- Where the game has got to, on one line: the score, and the move the board is
-           on beside it. The clock that walks back through those moves stays below, with
-           the rest of the controls. -->
-      <p id="score-line"><span id="score">Score: 0  |  Best: 0</span>  |  <span id="timeline-label">Move 0</span></p>
+      <!-- Where the game has got to, on one line: the score, how long it has been played
+           for, and the move the board is on. The clock that walks back through those
+           moves stays below, with the rest of the controls.
+
+           The move label goes last because it is the one that changes width mid-game:
+           scrubbing swaps "Moves: 4" for "Move 4/12" and back on every drag, and with
+           nothing to its right there is nothing for that to shove around. -->
+      <p id="score-line"><span id="score">Score: 0  |  Best: 0</span>  |  <span id="play-time">Play time: 0s</span>  |  <span id="timeline-label">Moves: 0</span></p>
       <!-- The game's own controls, and after them the clock that opens the ones for
            going back through it. -->
       <div id="actions">
@@ -591,7 +605,7 @@
       <!-- The readings the board is being played under, against the board itself. The
            last line of the panel: what the game has to say is said up by the controls,
            where the instructions it replaces were being read anyway. -->
-      <p id="stats">FPS: 0 | Play time: 0s | Save p50/90/99: collecting</p>
+      <p id="stats">FPS: 0 | Worst: collecting | Save p50/90/99: collecting</p>
 
       <div id="dpad">
         <div class="pad-pair">

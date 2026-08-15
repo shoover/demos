@@ -31,6 +31,11 @@ const SAVE_INTERVAL_MS = 5000;
 const SAVE_LATENCY_CAPACITY = 256;
 const SAVE_METRICS_REFRESH_MS = 1000;
 const STATS_REFRESH_MS = 250;
+// Long enough that a clean window is a solid run of frames rather than a handful, short
+// enough that a hitch is still on screen a moment after it was felt. Doubles as the
+// longest gap that can be called a dropped frame at all, for the reason given in sample:
+// thirty missed refreshes is already a different kind of problem than jank.
+const FRAME_WINDOW_MS = 500;
 const MIN_SWIPE_DISTANCE = 36;
 
 // Also what the stylesheet starts --cell at, until the first measurement lands. The
@@ -58,6 +63,7 @@ const elements = {
   main: document.querySelector("main"),
   scoreLine: document.getElementById("score-line"),
   score: document.getElementById("score"),
+  playTimeLabel: document.getElementById("play-time"),
   help: document.getElementById("help"),
   stats: document.getElementById("stats"),
   boardWrap: document.getElementById("board-wrap"),
@@ -259,21 +265,69 @@ const saver = {
   },
 };
 
-/* Frame rate --------------------------------------------------------------- */
+/* Frame timing -------------------------------------------------------------- */
 
-const frameRate = {
-  value: 0,
+/**
+ * The frame rate over the last window, and the longest single gap inside it.
+ *
+ * Both, because they fail differently and neither implies the other. The rate catches a
+ * loop running slower than the display throughout; the worst gap catches one frame the
+ * page missed, which a mean over thirty frames averages away. Read together they
+ * separate the two cases a single figure runs together: 33 ms worst against 60 fps is
+ * the odd dropped frame, where 33 ms worst against 30 fps is every frame arriving late
+ * and a different problem entirely. That pair is not hypothetical -- it is what an
+ * iPhone playing on the d-pad needed to tell a normal interaction hitch from a
+ * half-rate loop, and the rate alone could not say which.
+ *
+ * They share one window and one anchor. Sampling them separately looks equivalent and
+ * is not: the reading restarts on a parked loop, so two windows started from the same
+ * clock drift apart, and a hitch then lands inside one and outside the other.
+ */
+const frameTiming = {
+  fps: 0,
+  worstMs: 0,
   frames: 0,
+  windowWorst: 0,
   windowStart: 0,
+  previous: null,
 
   sample(now) {
-    this.frames += 1;
-    const elapsed = now - this.windowStart;
-    if (elapsed >= 500) {
-      this.value = (this.frames * 1000) / elapsed;
+    // A gap at least as long as the window itself is the loop having been parked, not a
+    // frame the page missed: rAF stops for a hidden tab, and for anything else that
+    // suspends the page -- an occluded window, a paused debugger, a sleeping machine.
+    // None of those announce themselves reliably (a backgrounded tab throttles to about
+    // one frame a second, and headless Chromium does it without firing
+    // visibilitychange), so the length of the gap is what rules them out. The window it
+    // lands in cannot be characterised either way, so the reading restarts on it.
+    if (this.previous === null || now - this.previous >= FRAME_WINDOW_MS) {
+      this.previous = now;
+      this.windowStart = now;
+      this.windowWorst = 0;
       this.frames = 0;
+      return;
+    }
+    // Counted after the anchor check, so the frame that opens a window is the interval's
+    // near end rather than one of the frames inside it: over the window, frames counted
+    // and intervals elapsed are then the same number, which is what makes the rate exact
+    // at a locked refresh instead of one frame light.
+    this.frames += 1;
+    this.windowWorst = Math.max(this.windowWorst, now - this.previous);
+    this.previous = now;
+    const elapsed = now - this.windowStart;
+    if (elapsed >= FRAME_WINDOW_MS) {
+      this.fps = (this.frames * 1000) / elapsed;
+      this.worstMs = this.windowWorst;
+      this.frames = 0;
+      this.windowWorst = 0;
       this.windowStart = now;
     }
+  },
+
+  summary() {
+    if (this.worstMs === 0) {
+      return "collecting";
+    }
+    return `${this.worstMs.toFixed(1)} ms`;
   },
 };
 
@@ -453,11 +507,13 @@ function paintTimeline() {
   // Off while the past is on screen, and off on an opening board, which has no move
   // behind it to take back.
   elements.undo.disabled = !game.atLatest || game.cursor === 0;
-  // The total is worth saying only when the position can differ from it. The label ends
-  // the score line, with nothing to its right, so the two forms can be as wide as they
-  // like: the line wraps before anything is pushed out of place.
+  // Two different readings, so two different words for them. At the latest state the
+  // number is how many moves have been played, and reads as a total; scrubbed back it is
+  // which move is on screen, one of a set, and needs that set beside it to mean anything.
+  // The label ends the score line, with nothing to its right, so the two forms can be as
+  // wide as they like: the line wraps before anything is pushed out of place.
   elements.timelineLabel.textContent = game.atLatest
-    ? `Move ${count(game.moves)}`
+    ? `Moves: ${count(game.moves)}`
     : `Move ${count(game.moves)}/${count(game.latest.moves)}`;
   elements.board.classList.toggle("past", !game.atLatest);
   for (const button of dpadButtons) {
@@ -545,10 +601,16 @@ function stepIndicator(now) {
   elements.nextMove.style.transform = `translate(${dx * distance}px, ${dy * distance}px)`;
 }
 
-function paintStats(playSeconds) {
+// Up on the score line rather than down among the readings: it is what the game has got
+// to, like the score and the move beside it, and not a measurement of the page.
+function paintPlayTime(playSeconds) {
+  elements.playTimeLabel.textContent = `Play time: ${playSeconds.toFixed(0)}s`;
+}
+
+function paintStats() {
   elements.stats.textContent =
-    `FPS: ${frameRate.value.toFixed(0)}` +
-    ` | Play time: ${playSeconds.toFixed(0)}s` +
+    `FPS: ${frameTiming.fps.toFixed(0)}` +
+    ` | Worst: ${frameTiming.summary()}` +
     ` | Save p50/90/99: ${saver.summary()}`;
 }
 
@@ -1320,7 +1382,7 @@ function frame(now) {
   stepSlide(now);
   stepBursts(now);
   stepIndicator(now);
-  frameRate.sample(now);
+  frameTiming.sample(now);
 
   const playSeconds = playTime.elapsed();
   // acceptingInput doubles as "startup succeeded": with the recovery overlay up, an
@@ -1331,7 +1393,8 @@ function frame(now) {
   saver.refreshMetrics(now);
   if (now - lastStatsPaint >= STATS_REFRESH_MS) {
     lastStatsPaint = now;
-    paintStats(playSeconds);
+    paintPlayTime(playSeconds);
+    paintStats();
   }
 }
 
