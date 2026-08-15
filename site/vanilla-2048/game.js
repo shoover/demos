@@ -158,6 +158,17 @@ const playTime = {
 
 document.addEventListener("visibilitychange", () => playTime.sync());
 
+/**
+ * Whether the clock should be running for the game as it now stands.
+ *
+ * Asked of the newest state rather than of the state on screen, because the clock
+ * belongs to the game and not to the board being looked at: it runs whenever the game
+ * is under way, however far back the scrubber has been left.
+ */
+function clockRuns() {
+  return game.latest.moves > 0 && !game.latest.gameOver;
+}
+
 /* Saving ------------------------------------------------------------------- */
 
 /** Persists game state and reports how long the writes take. */
@@ -542,6 +553,30 @@ function paintHelp() {
   elements.help.textContent = message || instructions();
 }
 
+/**
+ * Draw everything that reports the state the game is now in: the board, and the panel
+ * lines that say what it is worth, where it sits, and what there is to say about it.
+ *
+ * `burst` is how the board arrived, in paintSettled's terms; left off, it is drawn at
+ * rest. Every path that changes which state is on screen ends here, so none of them can
+ * repaint three quarters of the page and leave the fourth saying something else.
+ */
+function repaint(burst, prefix = "") {
+  paintSettled(burst);
+  paintPanel(prefix);
+}
+
+/**
+ * The panel lines alone, for the one caller that must not touch the board: a move paints
+ * the tiles where they started and walks them over, so repainting the board here would
+ * drop them on their destinations a slide early.
+ */
+function paintPanel(prefix = "") {
+  paintScore();
+  paintTimeline();
+  paintMessage(prefix);
+}
+
 /* Sizing ------------------------------------------------------------------- */
 
 /**
@@ -642,20 +677,37 @@ function landSlide() {
   settle();
 }
 
+/**
+ * Write down what a change to the live game leaves behind: the clock's reading, the best
+ * score if it moved, and the game itself.
+ *
+ * The clock is read before it is set, so the seconds stored are the ones the change
+ * happened at rather than a fresh zero, and whether it keeps running is asked of the
+ * game rather than assumed: the same call has to start it on the first move and stop it
+ * on the last.
+ */
+function commitChange(bestChanged = false) {
+  const playSeconds = playTime.elapsed();
+  playTime.set(playSeconds, clockRuns());
+  if (bestChanged) {
+    saveBestScore(game.best);
+  }
+  saver.save(game, playSeconds);
+}
+
 function startNewGame() {
   const spawned = game.reset();
   slide = null;
   lastMoveAt = -Infinity;
   // Every control in it is about to be disabled: a new game has nowhere to scrub to.
   setTimelineOpen(false);
-  paintSettled({ appeared: new Set(spawned) });
-  paintScore();
-  paintTimeline();
   // Just the news: the line it is standing in already says how to play, and saying it
   // again in fewer words would be the one thing this message costs.
-  setMessage("New game.");
+  repaint({ appeared: new Set(spawned) }, "New game.");
+  // The clock starts over with the board rather than carrying the last game's seconds
+  // across; commitChange picks the zero straight back up.
   playTime.set(0, false);
-  saver.save(game, 0);
+  commitChange();
 }
 
 /**
@@ -681,10 +733,7 @@ function showState(index) {
   }
   landSlide();
   game.seek(index);
-  paintSettled(game.arrival);
-  paintScore();
-  paintTimeline();
-  paintMessage();
+  repaint(game.arrival);
 }
 
 function applyMove(direction) {
@@ -709,15 +758,8 @@ function applyMove(direction) {
     })
   );
 
-  paintScore();
-  paintTimeline();
-  paintMessage();
-  const playSeconds = playTime.elapsed();
-  playTime.set(playSeconds, !game.gameOver);
-  if (result.bestChanged) {
-    saveBestScore(game.best);
-  }
-  saver.save(game, playSeconds);
+  paintPanel();
+  commitChange(result.bestChanged);
 }
 
 /* Input -------------------------------------------------------------------- */
@@ -1135,9 +1177,7 @@ function restoreGame() {
   }
   const saved = decodeSavedState(serialized, game.best);
   game.restore(saved);
-  // The clock belongs to the game, not to the state being looked at: it runs whenever
-  // the newest state is a game under way, however far back the scrubber was left.
-  playTime.set(saved.playSeconds, game.latest.moves > 0 && !game.latest.gameOver);
+  playTime.set(saved.playSeconds, clockRuns());
   return true;
 }
 
@@ -1155,12 +1195,9 @@ function start() {
   }
 
   if (restored) {
-    paintMessage("Saved game restored.");
-    paintScore();
-    paintTimeline();
     // At rest, unlike a state scrubbed to: reopening a save is not a move arriving,
     // however far back the state it opens on sits.
-    paintSettled();
+    repaint(undefined, "Saved game restored.");
     saver.defer();
   } else {
     startNewGame();
