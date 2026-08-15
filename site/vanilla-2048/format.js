@@ -37,27 +37,19 @@ export const abbreviate = (value) => {
   return String(value);
 };
 
-// The clock, abbreviated the same way the score is: seconds alone read fine up to a
-// minute, but a long session in raw seconds runs as long as the score line's own worst
-// case. Each tier is checked after rounding rather than before, so 59.96 minutes reads
-// as "1h" rather than "60m" -- the same carry a naive port of abbreviate() would have
-// missed, without needing abbreviate()'s separate bump-to-the-next-unit step: recomputed
-// from the raw seconds, a tier that rounds up to its own limit simply fails its own
-// under-the-limit check and falls through to the one above it.
-const round1 = (value) => Math.round(value * 10) / 10;
+// A clock reading, not a rollover into days: minutes and seconds stay two digits, and
+// the hour just keeps growing past 99 rather than folding into a unit the score line's
+// own abbreviate() would use. A stopwatch, not a score.
+const pad2 = (value) => String(value).padStart(2, "0");
 
 export const formatDuration = (totalSeconds) => {
-  const seconds = Math.max(0, Math.round(totalSeconds));
-  if (seconds < 60) {
-    return `${seconds}s`;
-  }
-  const minutes = round1(seconds / 60);
-  if (minutes < 60) {
-    return `${minutes}m`;
-  }
-  const hours = round1(seconds / 3600);
-  if (hours < 24) {
-    return `${hours}h`;
-  }
-  return `${round1(seconds / 86400)}d`;
+  // Floored, not rounded: a stopwatch reads 0:00 through the whole first second, not
+  // just up to its midpoint, and ticks over to 0:01 exactly when the second elapses.
+  const total = Math.max(0, Math.floor(totalSeconds));
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const seconds = total % 60;
+  return hours > 0
+    ? `${hours}:${pad2(minutes)}:${pad2(seconds)}`
+    : `${minutes}:${pad2(seconds)}`;
 };
