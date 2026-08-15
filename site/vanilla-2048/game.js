@@ -4,6 +4,7 @@
  */
 
 import { SIZE, Game, SaveError, decodeSavedState } from "./board.js";
+import { abbreviate, count } from "./format.js";
 
 const BEST_SCORE_KEY = "vanilla-2048.bestScore";
 // The best score reached in a game that was played on from an earlier state. A separate
@@ -86,26 +87,6 @@ const elements = {
 const compactMedia = window.matchMedia(
   document.getElementById("compact-styles").media
 );
-
-const count = (value) => value.toLocaleString("en-US");
-
-// The score line's own numbers, short enough that the line never wraps: a comma-grouped
-// score can run to eight digits once a game has been replayed past a high best, and at
-// that length the panel is narrower than the line on anything but a wide desktop. One
-// decimal place, dropped when it would just be a trailing zero, is what keeps "10.1k"
-// short and "10M" from reading as "10.0M".
-const abbreviate = (value) => {
-  for (const [threshold, suffix] of [
-    [1e9, "B"],
-    [1e6, "M"],
-    [1e3, "k"],
-  ]) {
-    if (value >= threshold) {
-      return `${Math.round((value / threshold) * 10) / 10}${suffix}`;
-    }
-  }
-  return String(value);
-};
 
 function setStatus(text, clearAfterMs) {
   elements.status.textContent = text;
