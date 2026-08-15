@@ -9,7 +9,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { abbreviate, count } from "../site/vanilla-2048/format.js";
+import { abbreviate, count, formatDuration } from "../site/vanilla-2048/format.js";
 
 test("count groups digits with commas", () => {
   assert.equal(count(0), "0");
@@ -42,3 +42,22 @@ test("abbreviate never grows longer once a unit is reached", () => {
     assert.ok(abbreviate(value).length <= 5, `${value} -> ${abbreviate(value)}`);
   }
 });
+
+for (const [seconds, expected] of [
+  [0, "0s"],
+  [45, "45s"],
+  [59, "59s"],
+  [60, "1m"],
+  [184, "3.1m"],
+  [3540, "59m"],
+  [3550, "59.2m"],
+  [3599, "1h"], // carries up rather than reading as "60m"
+  [3600, "1h"],
+  [12345, "3.4h"],
+  [86399, "1d"], // carries up rather than reading as "24h"
+  [86400, "1d"],
+]) {
+  test(`formatDuration(${seconds}) is "${expected}"`, () => {
+    assert.equal(formatDuration(seconds), expected);
+  });
+}
