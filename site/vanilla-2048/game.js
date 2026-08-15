@@ -661,9 +661,16 @@ function startNewGame() {
 /**
  * Show the state at a timeline position, and say which one it is.
  *
- * No animation between states: scrubbing is looking rather than playing, and a drag
- * along the slider crosses dozens of states in the time one slide would take. A slide
- * still in flight is landed first, so it cannot finish over the state seeked to.
+ * The tiles the move landed burst as they would have when it was played: the merges
+ * swell and settle, the tile it spawned springs in. A state looks the same whichever
+ * way it was reached, so stepping back plays the burst of the state arrived at rather
+ * than unwinding the one left behind -- what is being shown is a board and the move
+ * that made it, not a move running in reverse.
+ *
+ * No slide, though, which is the one part of a move left to play mode: a drag along the
+ * slider crosses dozens of states in the time a single slide would take, while a burst
+ * is over in a frame or two and never leaves a tile between cells. A slide still in
+ * flight is landed first, so it cannot finish over the state seeked to.
  *
  * The move that reaches the newest state again is not saved from here; the interval
  * save picks the cursor up, which keeps a drag from writing storage once per stop.
@@ -674,7 +681,7 @@ function showState(index) {
   }
   landSlide();
   game.seek(index);
-  paintSettled();
+  paintSettled(game.arrival);
   paintScore();
   paintTimeline();
   paintMessage();
@@ -1151,6 +1158,8 @@ function start() {
     paintMessage("Saved game restored.");
     paintScore();
     paintTimeline();
+    // At rest, unlike a state scrubbed to: reopening a save is not a move arriving,
+    // however far back the state it opens on sits.
     paintSettled();
     saver.defer();
   } else {

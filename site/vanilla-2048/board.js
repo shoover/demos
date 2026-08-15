@@ -153,6 +153,49 @@ export function compressAndMerge(line) {
 }
 
 /**
+ * Where a move landed: the cells it merged into, and the cell it spawned onto.
+ *
+ * Worked out from the boards either side of the move rather than recorded alongside
+ * them, so a game reopened from a save -- which carries boards and directions and
+ * nothing else -- arrives with the same burst as one being played.
+ *
+ * `previous` is the board the move was played from, `cells` the board it produced. The
+ * spawn is found by collapsing `previous` again and taking the cell the collapse left
+ * empty that `cells` has filled; a save whose two boards are not a move apart names
+ * whatever cells they disagree about, which is a burst on the wrong tiles rather than
+ * anything worse.
+ */
+export function arrivalCells(previous, direction, cells) {
+  const merged = new Set();
+  const appeared = new Set();
+  if (direction === null) {
+    return { merged, appeared };
+  }
+
+  const collapsed = Game.emptyBoard();
+  for (const coordinates of lineCoordinates(direction)) {
+    const line = coordinates.map(
+      (cell) => previous[Math.floor(cell / SIZE)][cell % SIZE]
+    );
+    const { merged: values, mergePositions } = compressAndMerge(line);
+    coordinates.forEach((cell, index) => {
+      collapsed[Math.floor(cell / SIZE)][cell % SIZE] = values[index];
+    });
+    for (const index of mergePositions) {
+      merged.add(coordinates[index]);
+    }
+  }
+
+  for (let cell = 0; cell < SIZE * SIZE; cell += 1) {
+    const [row, col] = [Math.floor(cell / SIZE), cell % SIZE];
+    if (collapsed[row][col] === 0 && cells[row][col] !== 0) {
+      appeared.add(cell);
+    }
+  }
+  return { merged, appeared };
+}
+
+/**
  * One point on the timeline: a board, the counters that belong with it, and the move
  * that led to it.
  *
@@ -320,6 +363,24 @@ export class Game {
   get nextDirection() {
     const next = this.timeline[this.cursor + 1];
     return next === undefined ? null : next.direction;
+  }
+
+  /**
+   * How the state on screen came to be: the cells its move merged into and the cell it
+   * spawned onto, which is what a repaint bursts to show a move arriving.
+   *
+   * Both empty when nothing on the timeline led here -- the opening board of a game, the
+   * oldest state of a timeline trimmed at its limit, or a state from a save written
+   * before directions were tracked. A state that cannot say what reached it is drawn at
+   * rest, the same way its arrow is left off.
+   */
+  get arrival() {
+    const previous = this.timeline[this.cursor - 1];
+    if (previous === undefined) {
+      return { merged: new Set(), appeared: new Set() };
+    }
+    const state = this.timeline[this.cursor];
+    return arrivalCells(previous.cells, state.direction, state.cells);
   }
 
   static emptyBoard() {
