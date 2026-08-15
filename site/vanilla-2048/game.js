@@ -66,6 +66,7 @@ const elements = {
   tiles: document.getElementById("tiles"),
   overlay: document.getElementById("overlay"),
   nextMove: document.getElementById("next-move"),
+  undo: document.getElementById("undo"),
   timeTravel: document.getElementById("time-travel"),
   timeline: document.getElementById("timeline"),
   scrubber: document.getElementById("scrubber"),
@@ -449,6 +450,9 @@ function paintTimeline() {
   elements.stepForward.disabled = game.atLatest;
   elements.latest.disabled = game.atLatest;
   elements.playFromHere.disabled = game.atLatest;
+  // Off while the past is on screen, and off on an opening board, which has no move
+  // behind it to take back.
+  elements.undo.disabled = !game.atLatest || game.cursor === 0;
   // The total is worth saying only when the position can differ from it. The label ends
   // the score line, with nothing to its right, so the two forms can be as wide as they
   // like: the line wraps before anything is pushed out of place.
@@ -1009,6 +1013,13 @@ function onPress(button, press) {
 for (const direction of ["up", "down", "left", "right"]) {
   onPress(document.getElementById(direction), () => applyMove(direction));
 }
+// Pressed over and over as ordinary use -- back, and back again -- so it is wired like a
+// d-pad arrow rather than like New Game, for the reason onPress gives.
+onPress(elements.undo, () =>
+  // The move taken back is the one after the state left on screen, which is the move
+  // count as it now stands plus one.
+  playFrom(game.cursor - 1, () => `Move ${count(game.moves + 1)} taken back.`)
+);
 onPress(elements.stepBack, () => showState(game.cursor - 1));
 onPress(elements.stepForward, () => showState(game.cursor + 1));
 onPress(elements.timeTravel, () => {
