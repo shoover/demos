@@ -535,6 +535,73 @@ test("undo is playing on from the state before this one", () => {
   assert.equal(game.atLatest, true);
 });
 
+/* Undo tallies ---------------------------------------------------------------- */
+
+test("taking play back is tallied against the move it resumed at", () => {
+  const game = replayable();
+  game.playFrom(2);
+  // One undo, however many moves it reached back over, against the state at move 2 --
+  // which is a move the game still has, unlike the two that are now gone.
+  assert.deepEqual([...game.undos], [[2, 1]]);
+});
+
+test("tallies count undos rather than the moves they take back", () => {
+  const game = replayable();
+  game.seek(4);
+  game.playFrom(3);
+  game.move("left");
+  game.playFrom(3);
+  assert.deepEqual([...game.undos], [[3, 2]]);
+
+  // A longer reach back takes those states with it, and their tallies come along: three
+  // undos by now, and the state the game stands on is move 0. The fourth move it just
+  // discarded does not make it four.
+  game.move("down");
+  game.playFrom(0);
+  assert.deepEqual([...game.undos], [[0, 3]]);
+});
+
+test("taking back a state that was itself undone at keeps the count", () => {
+  // Undo pressed twice in a row: the first press tallies against move 3, the second
+  // takes move 3 back as well. Both presses are still counted, against the state the
+  // game is left standing on -- the graph has no column for the one that has just gone.
+  const game = replayable();
+  game.seek(4);
+  game.playFrom(3);
+  game.playFrom(2);
+  assert.deepEqual([...game.undos], [[2, 2]]);
+});
+
+test("playing on from the newest state tallies nothing", () => {
+  const game = replayable();
+  game.seek(4);
+  assert.equal(game.playFrom(4), 0);
+  assert.equal(game.undos.size, 0);
+});
+
+test("a new game starts with no undos", () => {
+  const game = replayable();
+  game.playFrom(2);
+  game.reset();
+  assert.equal(game.undos.size, 0);
+});
+
+test("tallies are dropped with the states they were counted against", () => {
+  const game = replayable();
+  game.playFrom(2);
+  game.playFrom(1);
+  assert.deepEqual([...game.undos], [[1, 2]]);
+
+  // Far enough for the trim to run past both: the graph has no axis position for a move
+  // the timeline no longer carries, so the tally goes with it.
+  for (let extra = 0; extra < TIMELINE_LIMIT + 10; extra += 1) {
+    game.moves += 1;
+    game.record();
+  }
+  assert.equal(game.undos.size, 0);
+  assert.ok(game.timeline[0].moves > 2);
+});
+
 /* Best scores ----------------------------------------------------------------- */
 
 test("a clean game scores into the clean best", () => {
@@ -701,6 +768,40 @@ test("a state saved without its move reads back with none", () => {
   // And it survives a round trip rather than turning into something else.
   assert.equal(decodeSavedState(game.encode(1), bestsOf(game)).timeline[0].direction, null);
 });
+
+test("undo tallies survive a round trip through the save format", () => {
+  const played = replayable();
+  played.playFrom(2);
+  played.move("right");
+
+  const restored = newGame();
+  restored.restore(decodeSavedState(played.encode(2), bestsOf(played)));
+  assert.deepEqual([...restored.undos], [...played.undos]);
+});
+
+test("a save written before undos were tallied reads back with none", () => {
+  const saved = decodeSavedState(encoded(), BESTS);
+  assert.equal(saved.undos.size, 0);
+
+  const game = newGame();
+  game.restore(saved);
+  assert.equal(game.undos.size, 0);
+});
+
+for (const [name, undos] of [
+  ["is not a list", { 0: [7, 1] }],
+  ["holds something other than a pair", [[7]]],
+  ["names a fractional move", [[7.5, 1]]],
+  ["names a negative move", [[-1, 1]]],
+  ["counts a fractional number of moves", [[7, 1.5]]],
+  ["counts no undos at all", [[7, 0]]],
+  ["names a move the timeline does not carry", [[8, 1]]],
+  ["names the same move twice", [[7, 1], [7, 2]]],
+]) {
+  test(`an undo tally that ${name} is rejected`, () => {
+    assert.throws(() => decodeSavedState(encoded({ undos }), BESTS), SaveError);
+  });
+}
 
 test("a replayed game comes back knowing which move it was played on from", () => {
   const played = replayable();

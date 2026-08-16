@@ -258,6 +258,42 @@ function decodeState(entry, best, previous) {
 }
 
 /**
+ * Read back the undo tallies, as move-count/undos pairs.
+ *
+ * Every key has to name a state the save still carries: a tally against a move outside
+ * the timeline is one the graph has no axis position for, and the only ways to write one
+ * are a bug here or an edited save. Both are corrupt in the sense the overlay offers to
+ * clear, rather than something to draw around.
+ */
+function decodeUndos(value, firstMove, lastMove) {
+  if (!Array.isArray(value)) {
+    throw new SaveError(`Invalid saved 2048 undo tally: ${JSON.stringify(value)}`);
+  }
+  const undos = new Map();
+  for (const entry of value) {
+    if (!Array.isArray(entry) || entry.length !== 2) {
+      throw new SaveError(`Invalid saved 2048 undo entry: ${JSON.stringify(entry)}`);
+    }
+    const [move, undone] = entry;
+    requireNonNegativeInt(move, "undo move");
+    requireNonNegativeInt(undone, "undo count");
+    if (undone === 0) {
+      throw new SaveError(`Saved 2048 undo tally at move ${move} counts no undos`);
+    }
+    if (move < firstMove || move > lastMove) {
+      throw new SaveError(
+        `Saved 2048 undo at move ${move} is outside its timeline ${firstMove}-${lastMove}`
+      );
+    }
+    if (undos.has(move)) {
+      throw new SaveError(`Saved 2048 undo at move ${move} is recorded twice`);
+    }
+    undos.set(move, undone);
+  }
+  return undos;
+}
+
+/**
  * The states a save carries, oldest first, whichever version wrote it.
  *
  * A version 1 save predates the timeline and stored a single state at the top level. It
@@ -281,9 +317,9 @@ function savedStates(state) {
  * was ever recorded is inconsistent with itself. Which of the two bounds it is measured
  * against is the save's own business, since the save says whether it was replayed.
  *
- * Returns the whole timeline, which of its states was being viewed, and where play was
- * last resumed from -- the scrub position and the replay point are both part of what a
- * reload has to put back.
+ * Returns the whole timeline, which of its states was being viewed, where play was last
+ * resumed from, and how often it has been taken back -- the scrub position, the replay
+ * point and the undo tallies are all part of what a reload has to put back.
  */
 export function decodeSavedState(serialized, { best, replayedBest }) {
   let state;
@@ -324,6 +360,9 @@ export function decodeSavedState(serialized, { best, replayedBest }) {
     );
   }
 
+  // Absent as well as empty: every save written before undos were tallied at all.
+  const undos = decodeUndos(state.undos ?? [], timeline[0].moves, timeline.at(-1).moves);
+
   const latestMoves = timeline[timeline.length - 1].moves;
   if (replayedFrom !== null && replayedFrom > latestMoves) {
     throw new SaveError(
@@ -341,7 +380,7 @@ export function decodeSavedState(serialized, { best, replayedBest }) {
     );
   }
 
-  return { timeline, cursor, playSeconds, replayedFrom };
+  return { timeline, cursor, playSeconds, replayedFrom, undos };
 }
 
 /**
@@ -366,6 +405,11 @@ export class Game {
     // when the oldest states are trimmed and this has to still name the same move --
     // and because naming the move is what it is for.
     this.replayedFrom = null;
+    // How many times play has ever been taken back to each state: move count -> undos.
+    // Keyed by the move play resumed *at* rather than by the moves discarded, so every
+    // key names a move the game still has -- the moves taken back are gone from the
+    // timeline by definition, and a graph drawn along it could not place them.
+    this.undos = new Map();
     this.cells = Game.emptyBoard();
     this.score = 0;
     this.moves = 0;
@@ -470,6 +514,7 @@ export class Game {
     // A fresh game is a clean one however the last was played: what was replayed was
     // that game's history, and this one has none yet.
     this.replayedFrom = null;
+    this.undos = new Map();
     const spawned = [this.spawnTile(), this.spawnTile()];
     // A new game is a new timeline: the old one belonged to a game that is over.
     this.timeline = [captureState(this)];
@@ -488,6 +533,13 @@ export class Game {
     this.timeline.push(captureState(this, direction));
     if (this.timeline.length > TIMELINE_LIMIT) {
       this.timeline.shift();
+      // The undo tallies go with the states they were counted against: what is dropped
+      // is a move the game can no longer show, and a tally the graph has no axis for.
+      for (const move of this.undos.keys()) {
+        if (move < this.timeline[0].moves) {
+          this.undos.delete(move);
+        }
+      }
     }
     this.cursor = this.timeline.length - 1;
   }
@@ -533,6 +585,26 @@ export class Game {
     }
 
     this.timeline.length = landed + 1;
+    // One, whether it took back a move or twenty: what is counted is the decision to go
+    // back, not how far it reached. How far is already on the axis -- the line simply
+    // resumes from an earlier move -- so counting the moves here would draw the same
+    // fact twice and make one long reach back look like a game full of second thoughts.
+    //
+    // Tallies standing on the states just discarded come down with them rather than
+    // being dropped or left behind. Undo pressed twice in a row is the ordinary way to
+    // reach that: the first press tallies against a state the second one then takes
+    // back. Left behind, they would key moves the timeline no longer carries and the
+    // graph no longer has an axis for; dropped, the second press would erase the record
+    // of the first. Folded in, both presses are still counted, at the furthest-back
+    // state the game actually stands on.
+    let undone = 1;
+    for (const [move, count] of this.undos) {
+      if (move > this.moves) {
+        undone += count;
+        this.undos.delete(move);
+      }
+    }
+    this.undos.set(this.moves, (this.undos.get(this.moves) ?? 0) + undone);
     // The clean best comes across rather than being left behind: those points were
     // really scored, before this game had rewritten anything, so taking a move back must
     // not cost a total that had actually been reached. It also puts the replayed track
@@ -611,6 +683,7 @@ export class Game {
   restore(saved) {
     this.timeline = saved.timeline.map((state) => captureState(state, state.direction));
     this.replayedFrom = saved.replayedFrom ?? null;
+    this.undos = new Map(saved.undos);
     this.seek(saved.cursor);
   }
 
@@ -630,6 +703,9 @@ export class Game {
       // the field ignores it and still opens the game, which is what an older build
       // deployed elsewhere would otherwise be unable to do.
       replayed_from: this.replayedFrom,
+      // Pairs rather than an object, so the move stays a number on the way through
+      // storage instead of coming back as a string key that has to be parsed again.
+      undos: [...this.undos],
       play_seconds: playSeconds,
     });
   }
