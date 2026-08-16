@@ -197,19 +197,29 @@ export function arrivalCells(previous, direction, cells) {
 }
 
 /**
- * One point on the timeline: a board, the counters that belong with it, and the move
- * that led to it.
+ * One point on the timeline: a board, the counters that belong with it, the move that
+ * led to it, and how many times play has been taken back to it.
  *
  * The direction is carried by the state a move produced rather than by the state it was
  * played from, so recording one never has to reach back and amend the state before it.
  * What a reader usually wants is the other way round -- the move played *from* a state,
  * which is the direction on the state after it; Game.nextDirection does that lookup.
  *
+ * `undos` defaults to none, which is what a state being recorded for the first time has;
+ * a state read back from a save brings its own count along.
+ *
  * Copied on the way in, so a recorded state can never share a row with the live board
  * and be played on after the fact.
  */
-function captureState({ cells, score, moves, gameOver }, direction = null) {
-  return { cells: cells.map((row) => row.slice()), score, moves, gameOver, direction };
+function captureState({ cells, score, moves, gameOver, undos = 0 }, direction = null) {
+  return {
+    cells: cells.map((row) => row.slice()),
+    score,
+    moves,
+    gameOver,
+    direction,
+    undos,
+  };
 }
 
 /**
@@ -233,6 +243,9 @@ function decodeState(entry, best, previous) {
   // save written before directions were tracked has none of them at all. All three are
   // the same thing to a reader -- a state whose next move cannot be shown.
   const direction = entry.direction ?? null;
+  // Absent as well as zero: a state nothing has ever been taken back to does not write
+  // the field, and no save written before undos were counted has it either.
+  const undos = requireNonNegativeInt(entry.undos ?? 0, "undo count");
 
   if (direction !== null && !DIRECTIONS.includes(direction)) {
     throw new SaveError(
@@ -254,43 +267,7 @@ function decodeState(entry, best, previous) {
     throw new SaveError(`Saved 2048 timeline does not run forward at move ${moves}`);
   }
 
-  return { cells, score, moves, gameOver, direction };
-}
-
-/**
- * Read back the undo tallies, as move-count/undos pairs.
- *
- * Every key has to name a state the save still carries: a tally against a move outside
- * the timeline is one the graph has no axis position for, and the only ways to write one
- * are a bug here or an edited save. Both are corrupt in the sense the overlay offers to
- * clear, rather than something to draw around.
- */
-function decodeUndos(value, firstMove, lastMove) {
-  if (!Array.isArray(value)) {
-    throw new SaveError(`Invalid saved 2048 undo tally: ${JSON.stringify(value)}`);
-  }
-  const undos = new Map();
-  for (const entry of value) {
-    if (!Array.isArray(entry) || entry.length !== 2) {
-      throw new SaveError(`Invalid saved 2048 undo entry: ${JSON.stringify(entry)}`);
-    }
-    const [move, undone] = entry;
-    requireNonNegativeInt(move, "undo move");
-    requireNonNegativeInt(undone, "undo count");
-    if (undone === 0) {
-      throw new SaveError(`Saved 2048 undo tally at move ${move} counts no undos`);
-    }
-    if (move < firstMove || move > lastMove) {
-      throw new SaveError(
-        `Saved 2048 undo at move ${move} is outside its timeline ${firstMove}-${lastMove}`
-      );
-    }
-    if (undos.has(move)) {
-      throw new SaveError(`Saved 2048 undo at move ${move} is recorded twice`);
-    }
-    undos.set(move, undone);
-  }
-  return undos;
+  return { cells, score, moves, gameOver, direction, undos };
 }
 
 /**
@@ -360,9 +337,6 @@ export function decodeSavedState(serialized, { best, replayedBest }) {
     );
   }
 
-  // Absent as well as empty: every save written before undos were tallied at all.
-  const undos = decodeUndos(state.undos ?? [], timeline[0].moves, timeline.at(-1).moves);
-
   const latestMoves = timeline[timeline.length - 1].moves;
   if (replayedFrom !== null && replayedFrom > latestMoves) {
     throw new SaveError(
@@ -380,7 +354,7 @@ export function decodeSavedState(serialized, { best, replayedBest }) {
     );
   }
 
-  return { timeline, cursor, playSeconds, replayedFrom, undos };
+  return { timeline, cursor, playSeconds, replayedFrom };
 }
 
 /**
@@ -405,11 +379,6 @@ export class Game {
     // when the oldest states are trimmed and this has to still name the same move --
     // and because naming the move is what it is for.
     this.replayedFrom = null;
-    // How many times play has ever been taken back to each state: move count -> undos.
-    // Keyed by the move play resumed *at* rather than by the moves discarded, so every
-    // key names a move the game still has -- the moves taken back are gone from the
-    // timeline by definition, and a graph drawn along it could not place them.
-    this.undos = new Map();
     this.cells = Game.emptyBoard();
     this.score = 0;
     this.moves = 0;
@@ -514,7 +483,6 @@ export class Game {
     // A fresh game is a clean one however the last was played: what was replayed was
     // that game's history, and this one has none yet.
     this.replayedFrom = null;
-    this.undos = new Map();
     const spawned = [this.spawnTile(), this.spawnTile()];
     // A new game is a new timeline: the old one belonged to a game that is over.
     this.timeline = [captureState(this)];
@@ -533,13 +501,6 @@ export class Game {
     this.timeline.push(captureState(this, direction));
     if (this.timeline.length > TIMELINE_LIMIT) {
       this.timeline.shift();
-      // The undo tallies go with the states they were counted against: what is dropped
-      // is a move the game can no longer show, and a tally the graph has no axis for.
-      for (const move of this.undos.keys()) {
-        if (move < this.timeline[0].moves) {
-          this.undos.delete(move);
-        }
-      }
     }
     this.cursor = this.timeline.length - 1;
   }
@@ -584,27 +545,20 @@ export class Game {
       return 0;
     }
 
-    this.timeline.length = landed + 1;
     // One, whether it took back a move or twenty: what is counted is the decision to go
     // back, not how far it reached. How far is already on the axis -- the line simply
     // resumes from an earlier move -- so counting the moves here would draw the same
     // fact twice and make one long reach back look like a game full of second thoughts.
     //
-    // Tallies standing on the states just discarded come down with them rather than
-    // being dropped or left behind. Undo pressed twice in a row is the ordinary way to
-    // reach that: the first press tallies against a state the second one then takes
-    // back. Left behind, they would key moves the timeline no longer carries and the
-    // graph no longer has an axis for; dropped, the second press would erase the record
-    // of the first. Folded in, both presses are still counted, at the furthest-back
-    // state the game actually stands on.
-    let undone = 1;
-    for (const [move, count] of this.undos) {
-      if (move > this.moves) {
-        undone += count;
-        this.undos.delete(move);
-      }
-    }
-    this.undos.set(this.moves, (this.undos.get(this.moves) ?? 0) + undone);
+    // The counts on the states being discarded come down with them rather than going
+    // with them. Undo pressed twice in a row is the ordinary way to reach that: the
+    // first press counts against a state the second one then takes back, and dropping
+    // it would erase the record of the first press.
+    const undone = this.timeline
+      .slice(landed + 1)
+      .reduce((sum, state) => sum + state.undos, 1);
+    this.timeline.length = landed + 1;
+    this.timeline[landed].undos += undone;
     // The clean best comes across rather than being left behind: those points were
     // really scored, before this game had rewritten anything, so taking a move back must
     // not cost a total that had actually been reached. It also puts the replayed track
@@ -683,7 +637,6 @@ export class Game {
   restore(saved) {
     this.timeline = saved.timeline.map((state) => captureState(state, state.direction));
     this.replayedFrom = saved.replayedFrom ?? null;
-    this.undos = new Map(saved.undos);
     this.seek(saved.cursor);
   }
 
@@ -697,15 +650,16 @@ export class Game {
         moves: state.moves,
         game_over: state.gameOver,
         direction: state.direction,
+        // Left out where there are none, which is nearly every state of nearly every
+        // game: the timeline is rewritten whole on every save, so a field that is zero
+        // a thousand times over is worth not writing.
+        ...(state.undos > 0 && { undos: state.undos }),
       })),
       cursor: this.cursor,
       // Added to the format rather than versioned into it: a reader that does not know
       // the field ignores it and still opens the game, which is what an older build
       // deployed elsewhere would otherwise be unable to do.
       replayed_from: this.replayedFrom,
-      // Pairs rather than an object, so the move stays a number on the way through
-      // storage instead of coming back as a string key that has to be parsed again.
-      undos: [...this.undos],
       play_seconds: playSeconds,
     });
   }

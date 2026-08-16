@@ -770,7 +770,7 @@ function paintChart() {
   context.setTransform(ratio, 0, 0, ratio, 0, 0);
   context.clearRect(0, 0, width, height);
 
-  const stats = binGame(game.timeline, game.undos);
+  const stats = binGame(game.timeline);
   // The bin under the pointer need not have survived: taking moves back shortens the
   // axis, and the bin that was being read can simply be gone. The pointer is not tracked
   // between repaints, so there is nothing to re-derive it from -- the graph goes back to
