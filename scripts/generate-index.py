@@ -16,21 +16,33 @@ SITE_ROOT = ROOT / "site"
 OUTPUT = SITE_ROOT / "index.html"
 
 
-class TitleParser(HTMLParser):
+class HeadParser(HTMLParser):
+    """Pulls the <title> and <meta name="description"> out of a demo page."""
+
     def __init__(self) -> None:
         super().__init__()
         self._in_title = False
         self._parts: list[str] = []
+        self._description: str | None = None
 
     @property
     def title(self) -> str:
         return " ".join("".join(self._parts).split())
+
+    @property
+    def description(self) -> str | None:
+        return self._description
 
     def handle_starttag(
         self, tag: str, attrs: list[tuple[str, str | None]]
     ) -> None:
         if tag.lower() == "title":
             self._in_title = True
+        elif tag.lower() == "meta":
+            attributes = {name.lower(): value for name, value in attrs}
+            if attributes.get("name", "").lower() == "description":
+                content = " ".join((attributes.get("content") or "").split())
+                self._description = content or None
 
     def handle_endtag(self, tag: str) -> None:
         if tag.lower() == "title":
@@ -45,6 +57,7 @@ class TitleParser(HTMLParser):
 class Demo:
     slug: str
     title: str
+    summary: str
 
     @property
     def href(self) -> str:
@@ -55,10 +68,10 @@ def fallback_title(slug: str) -> str:
     return " ".join(part for part in slug.replace("_", "-").split("-") if part).title()
 
 
-def read_title(index_path: Path) -> str | None:
-    parser = TitleParser()
+def read_head(index_path: Path) -> HeadParser:
+    parser = HeadParser()
     parser.feed(index_path.read_text(encoding="utf-8"))
-    return parser.title or None
+    return parser
 
 
 def discover_demos() -> list[Demo]:
@@ -69,10 +82,21 @@ def discover_demos() -> list[Demo]:
         if not child.is_dir() or not index_path.is_file():
             continue
 
+        head = read_head(index_path)
+        # The summary has no sensible default: a demo without one would ship a
+        # card that silently says nothing about it.
+        if head.description is None:
+            raise SystemExit(
+                f"{index_path.relative_to(ROOT)} has no non-empty "
+                '<meta name="description">, which the index uses as the '
+                "demo's summary."
+            )
+
         demos.append(
             Demo(
                 slug=child.name,
-                title=read_title(index_path) or fallback_title(child.name),
+                title=head.title or fallback_title(child.name),
+                summary=head.description,
             )
         )
 
@@ -83,8 +107,11 @@ def render(demos: list[Demo]) -> str:
     items = "\n".join(
         f"""      <li>
         <a href="{escape(demo.href)}">
-          <span>{escape(demo.title)}</span>
-          <code>{escape(demo.slug)}</code>
+          <div>
+            <span>{escape(demo.title)}</span>
+            <code>{escape(demo.slug)}</code>
+          </div>
+          <p>{escape(demo.summary)}</p>
         </a>
       </li>"""
         for demo in demos
@@ -144,9 +171,8 @@ def render(demos: list[Demo]) -> str:
 
     a {{
       display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 16px;
+      flex-direction: column;
+      gap: 6px;
       min-height: 64px;
       padding: 16px 18px;
       border: 1px solid rgba(31, 37, 35, 0.14);
@@ -164,9 +190,24 @@ def render(demos: list[Demo]) -> str:
       box-shadow: 0 0 0 4px rgba(20, 90, 85, 0.12);
     }}
 
+    a > div {{
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 16px;
+    }}
+
     span {{
       min-width: 0;
       font-weight: 700;
+    }}
+
+    p {{
+      margin: 0;
+      max-width: 68ch;
+      color: #59625d;
+      font-size: 0.9375rem;
+      line-height: 1.45;
     }}
 
     code {{
@@ -184,7 +225,7 @@ def render(demos: list[Demo]) -> str:
         padding: 32px 0;
       }}
 
-      a {{
+      a > div {{
         align-items: flex-start;
         flex-direction: column;
         gap: 6px;
@@ -203,7 +244,8 @@ def render(demos: list[Demo]) -> str:
           #111614;
       }}
 
-      code {{
+      code,
+      p {{
         color: #aab8b2;
       }}
 

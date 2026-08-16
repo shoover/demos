@@ -52,9 +52,8 @@
 
     a {
       display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 16px;
+      flex-direction: column;
+      gap: 6px;
       min-height: 64px;
       padding: 16px 18px;
       border: 1px solid rgba(31, 37, 35, 0.14);
@@ -72,9 +71,24 @@
       box-shadow: 0 0 0 4px rgba(20, 90, 85, 0.12);
     }
 
+    a > div {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 16px;
+    }
+
     span {
       min-width: 0;
       font-weight: 700;
+    }
+
+    p {
+      margin: 0;
+      max-width: 68ch;
+      color: #59625d;
+      font-size: 0.9375rem;
+      line-height: 1.45;
     }
 
     code {
@@ -92,7 +106,7 @@
         padding: 32px 0;
       }
 
-      a {
+      a > div {
         align-items: flex-start;
         flex-direction: column;
         gap: 6px;
@@ -111,7 +125,8 @@
           #111614;
       }
 
-      code {
+      code,
+      p {
         color: #aab8b2;
       }
 
@@ -137,14 +152,20 @@
     <ul>
       <li>
         <a href="vanilla-2048/">
-          <span>2048 in vanilla JavaScript</span>
-          <code>vanilla-2048</code>
+          <div>
+            <span>2048 in vanilla JavaScript</span>
+            <code>vanilla-2048</code>
+          </div>
+          <p>A 2048 port in vanilla JavaScript with a few extra features: d-pad buttons optimized for (my) thumbs on small touchscreens, time travel replay, stats.</p>
         </a>
       </li>
       <li>
         <a href="imgui-2048/">
-          <span>2048 with imgui-bundle + Pyodide</span>
-          <code>imgui-2048</code>
+          <div>
+            <span>2048 with imgui-bundle + Pyodide</span>
+            <code>imgui-2048</code>
+          </div>
+          <p>A 2048 port to play around with Pyodide/Wasm. It works, but installing packages every page load incurs a few seconds startup hit.</p>
         </a>
       </li>
     </ul>
