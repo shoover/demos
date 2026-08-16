@@ -35,6 +35,15 @@
       /* Painted by the script on every resize; every board dimension derives from them. */
       --cell: 92px;
       --gap: 8px;
+
+      /* The graph's two series, and nothing else in the page is coloured with them: its
+         axes and labels are the panel's own greys, so the only thing colour means there
+         is which series a mark belongs to. Stepped for the popup's ground rather than
+         picked by eye -- both clear 3:1 against it, and they stay a distinguishable pair
+         under every kind of colour blindness. Here rather than on the popup because the
+         script reads them back off an off-screen swatch, which is not inside it. */
+      --series-points: #3987e5;
+      --series-undos: #d95926;
     }
 
     html, body {
@@ -272,9 +281,12 @@
 
     /* Timeline -------------------------------------------------------------- */
 
-    /* The clock rides in the New Game line, under the move the board is on: what is
-       always up is where the game has got to, not how to walk back through it. */
-    #time-travel {
+    /* The clock and the graph ride in the New Game line, under the move the board is on:
+       what is always up is where the game has got to, not how to walk back through it or
+       how it got there. Both are icons in a row of words, so both are centred in a frame
+       sized like the buttons beside them. */
+    #time-travel,
+    #graph {
       display: grid;
       place-items: center;
     }
@@ -282,7 +294,8 @@
     /* Drawn rather than set: the panel's font is a Latin subset with no clock in it,
        and an emoji would arrive in the system's own colours, which this panel has
        none of. */
-    #time-travel svg {
+    #time-travel svg,
+    #graph svg {
       width: 15px;
       height: 15px;
       fill: none;
@@ -292,20 +305,16 @@
       stroke-linejoin: round;
     }
 
-    /* Opens downward from the clock, over the help line -- which puts it just clear of
-       the board, the one thing scrubbing is for looking at.
-       One row inside, wrapping only where a phone cannot fit it: the slider keeps the
-       space the buttons leave, down to a width where dragging still works. */
-    #timeline {
+    /* Both popups open downward from the button that owns them, over the help line --
+       which puts them just clear of the board, the one thing scrubbing is for looking at.
+       They share an anchor and are never open together, so they share their chrome. */
+    #timeline,
+    #stats-panel {
       position: absolute;
       top: calc(100% + 6px);
       right: 0;
       left: 0;
       z-index: 1;
-      display: flex;
-      flex-wrap: wrap;
-      gap: 8px;
-      align-items: center;
       padding: 8px;
       border: 1px solid rgba(255, 255, 255, 0.14);
       border-radius: 8px;
@@ -316,7 +325,17 @@
       box-shadow: 0 8px 28px rgba(0, 0, 0, 0.32);
     }
 
-    #timeline[hidden] { display: none; }
+    /* One row inside, wrapping only where a phone cannot fit it: the slider keeps the
+       space the buttons leave, down to a width where dragging still works. */
+    #timeline {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+    }
+
+    #timeline[hidden],
+    #stats-panel[hidden] { display: none; }
 
     /* Built out of its parts rather than themed with `accent-color`: the marker is a
        playhead, not a bubble, and a browser's own thumb cannot be made into one. */
@@ -392,12 +411,17 @@
     /* Tapped twice in a row as ordinary use -- stepping back and back, opening the
        popup and closing it -- exactly like a d-pad arrow, so they need the same
        defence against a phone reading two taps as a zoom. */
-    #step-back, #step-forward, #time-travel, #undo { touch-action: none; }
+    #step-back, #step-forward, #time-travel, #graph, #undo { touch-action: none; }
 
-    /* Viewing the past: the board is drawn back from the live one, so the state on
-       screen never has to be read from the label alone. */
-    #board.past #tiles { opacity: 0.75; }
-    #board.past .cell { background: #2c303a; }
+    /* Not in play: the board is drawn back from a live one, so a board that will not
+       move never has to be told apart by trying it. Two ways to get here and one look
+       for both -- an earlier state is on screen, or a popup is up and has stopped play --
+       because what they have in common is the whole of what this says. */
+    #board.past #tiles,
+    #board.paused #tiles { opacity: 0.75; }
+
+    #board.past .cell,
+    #board.paused .cell { background: #2c303a; }
 
     /* The move played next, over the board it was played from. It sits outside #tiles
        so it stays crisp against the board those rules dim, and takes no pointer events
@@ -437,6 +461,65 @@
     #next-move.right svg { transform: rotate(90deg); }
     #next-move.down svg { transform: rotate(180deg); }
     #next-move.left svg { transform: rotate(-90deg); }
+
+    /* Stats graph ----------------------------------------------------------- */
+
+    #stats-panel {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    #stats-panel p {
+      margin: 0;
+      line-height: 1.35;
+    }
+
+    #chart-legend,
+    #chart-readout {
+      font-size: 12px;
+      font-variant-numeric: tabular-nums;
+      color: #9fb3c8;
+    }
+
+    /* Laid out rather than spaced by margins: the entries used to be run together in one
+       line of text and set apart by a margin on the second swatch, which is a margin the
+       swatch keeps when the line wraps -- so the entry that dropped to a second row
+       started indented from the one above it. A row of rows lines them up at whatever
+       width the panel is. */
+    #chart-legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 2px 16px;
+    }
+
+    .legend-entry {
+      display: inline-flex;
+      gap: 6px;
+      align-items: center;
+    }
+
+    /* The swatch is the mark it stands for, at the weight the canvas draws it: a bar for
+       the bars, and a line for the line. */
+    .swatch {
+      width: 10px;
+      border-radius: 1px;
+    }
+
+    .swatch.points { height: 2px; background: var(--series-points); }
+    .swatch.undos { height: 8px; background: var(--series-undos); }
+
+    /* Sized here and redrawn at the device's pixels by the script, which is why the
+       element carries no width or height attribute: the only size that matters is the
+       one CSS gives it, and the backing store is derived from that. */
+    #chart {
+      display: block;
+      width: 100%;
+      height: 132px;
+      /* The board reads swipes anywhere in `main`, so pointing at a bin would otherwise
+         also be a move; the swipe handler skips this popup for the same reason. */
+      touch-action: none;
+    }
 
     /* D-pad ---------------------------------------------------------------- */
 
@@ -500,6 +583,8 @@
     main { padding: 6px; }
     #panel { font-size: 13px; }
     #board-wrap { margin: 2px 0; }
+    #chart { height: 108px; }
+    #chart-legend, #chart-readout { font-size: 11px; }
     #overlay { inset: 8px; max-width: calc(100% - 16px); padding: 8px 10px; border-radius: 8px; font-size: 12px; }
   </style>
 </head>
@@ -552,6 +637,22 @@
             <path d="M12 6.6 V12.4 L16.2 14.8" />
           </svg>
         </button>
+        <!-- One spark line, and nothing under it. At 15px the axis was a second stroke
+             carrying no information the line does not, and dropping it lets the line
+             have the whole frame -- which is what makes it read as a graph beside the
+             clock rather than as a scribble in the corner of one. Drawn rather than set,
+             for the reason the clock is. -->
+        <button
+          id="graph"
+          type="button"
+          aria-label="Game stats"
+          aria-expanded="false"
+          aria-controls="stats-panel"
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M3.5 17.5 L9.5 9.5 L14 13.5 L20.5 6.5" />
+          </svg>
+        </button>
 
         <!-- The slider is the whole game so far, one stop per move; the buttons beside
              it step a single move, for touch and for precision.
@@ -586,6 +687,28 @@
             title="Resume play here, discarding the moves after this one"
             disabled
           >Play from here</button>
+        </div>
+
+        <!-- The game against itself, along the moves it has taken: what it was worth,
+             and what it cost to get there. One graph, two lanes -- the two series are
+             measured in different units and would need two scales on one axis to share a
+             lane, which is the one way of drawing this that is always misread.
+
+             Everything in it is painted by the script; the canvas is sized in CSS and
+             redrawn at the device's own pixels. -->
+        <div id="stats-panel" hidden>
+          <!-- Named here rather than in the drawing, so the two series are identified in
+               text as well as by colour, and the swatches are where the stylesheet keeps
+               the two colours the canvas reads back off them. -->
+          <p id="chart-legend">
+            <span class="legend-entry"><span class="swatch points"></span>Points</span>
+            <span class="legend-entry"><span class="swatch undos"></span>Undos</span>
+          </p>
+          <canvas id="chart" role="img" aria-label="Points and undos by move"></canvas>
+          <!-- The graph in words: the whole game until a bin is pointed at, then that
+               bin. A canvas cannot be read by a screen reader and a hovered tooltip
+               cannot be read at all, so the reading lives on a line of its own. -->
+          <p id="chart-readout"></p>
         </div>
       </div>
       <!-- How to play, and where the game says its piece: a message stands in for the
