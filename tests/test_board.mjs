@@ -28,6 +28,9 @@ const HUGE_BEST = 10 ** 9;
 /** Best scores that bound anything, for the cases that are not about the bounds. */
 const BESTS = { best: HUGE_BEST, replayedBest: HUGE_BEST };
 
+/** Every state's undo count, oldest first: the whole of what a graph would draw. */
+const undosOf = (game) => game.timeline.map((state) => state.undos);
+
 /** The bounds a game's own save has to be read back against. */
 const bestsOf = (game) => ({ best: game.best, replayedBest: game.replayedBest });
 
@@ -542,7 +545,7 @@ test("taking play back is tallied against the move it resumed at", () => {
   game.playFrom(2);
   // One undo, however many moves it reached back over, against the state at move 2 --
   // which is a move the game still has, unlike the two that are now gone.
-  assert.deepEqual([...game.undos], [[2, 1]]);
+  assert.deepEqual(undosOf(game), [0, 0, 1]);
 });
 
 test("tallies count undos rather than the moves they take back", () => {
@@ -551,14 +554,14 @@ test("tallies count undos rather than the moves they take back", () => {
   game.playFrom(3);
   game.move("left");
   game.playFrom(3);
-  assert.deepEqual([...game.undos], [[3, 2]]);
+  assert.deepEqual(undosOf(game), [0, 0, 0, 2]);
 
   // A longer reach back takes those states with it, and their tallies come along: three
   // undos by now, and the state the game stands on is move 0. The fourth move it just
   // discarded does not make it four.
   game.move("down");
   game.playFrom(0);
-  assert.deepEqual([...game.undos], [[0, 3]]);
+  assert.deepEqual(undosOf(game), [3]);
 });
 
 test("taking back a state that was itself undone at keeps the count", () => {
@@ -569,28 +572,28 @@ test("taking back a state that was itself undone at keeps the count", () => {
   game.seek(4);
   game.playFrom(3);
   game.playFrom(2);
-  assert.deepEqual([...game.undos], [[2, 2]]);
+  assert.deepEqual(undosOf(game), [0, 0, 2]);
 });
 
 test("playing on from the newest state tallies nothing", () => {
   const game = replayable();
   game.seek(4);
   assert.equal(game.playFrom(4), 0);
-  assert.equal(game.undos.size, 0);
+  assert.deepEqual(undosOf(game), [0, 0, 0, 0, 0]);
 });
 
 test("a new game starts with no undos", () => {
   const game = replayable();
   game.playFrom(2);
   game.reset();
-  assert.equal(game.undos.size, 0);
+  assert.deepEqual(undosOf(game), [0]);
 });
 
 test("tallies are dropped with the states they were counted against", () => {
   const game = replayable();
   game.playFrom(2);
   game.playFrom(1);
-  assert.deepEqual([...game.undos], [[1, 2]]);
+  assert.deepEqual(undosOf(game), [0, 2]);
 
   // Far enough for the trim to run past both: the graph has no axis position for a move
   // the timeline no longer carries, so the tally goes with it.
@@ -598,7 +601,7 @@ test("tallies are dropped with the states they were counted against", () => {
     game.moves += 1;
     game.record();
   }
-  assert.equal(game.undos.size, 0);
+  assert.ok(game.timeline.every((state) => state.undos === 0));
   assert.ok(game.timeline[0].moves > 2);
 });
 
@@ -776,30 +779,31 @@ test("undo tallies survive a round trip through the save format", () => {
 
   const restored = newGame();
   restored.restore(decodeSavedState(played.encode(2), bestsOf(played)));
-  assert.deepEqual([...restored.undos], [...played.undos]);
+  assert.deepEqual(undosOf(restored), undosOf(played));
+  assert.ok(undosOf(played).some(Boolean), "the game under test took something back");
 });
 
-test("a save written before undos were tallied reads back with none", () => {
+test("a state saved without a count reads back with none", () => {
+  // Every state of nearly every game: the field is left out where it is zero, and no
+  // save written before undos were counted has it at all.
   const saved = decodeSavedState(encoded(), BESTS);
-  assert.equal(saved.undos.size, 0);
+  assert.deepEqual(saved.timeline.map((state) => state.undos), [0]);
 
   const game = newGame();
   game.restore(saved);
-  assert.equal(game.undos.size, 0);
+  assert.deepEqual(undosOf(game), [0]);
 });
 
 for (const [name, undos] of [
-  ["is not a list", { 0: [7, 1] }],
-  ["holds something other than a pair", [[7]]],
-  ["names a fractional move", [[7.5, 1]]],
-  ["names a negative move", [[-1, 1]]],
-  ["counts a fractional number of moves", [[7, 1.5]]],
-  ["counts no undos at all", [[7, 0]]],
-  ["names a move the timeline does not carry", [[8, 1]]],
-  ["names the same move twice", [[7, 1], [7, 2]]],
+  ["is fractional", 1.5],
+  ["is negative", -1],
+  ["is not a number", "two"],
 ]) {
-  test(`an undo tally that ${name} is rejected`, () => {
-    assert.throws(() => decodeSavedState(encoded({ undos }), BESTS), SaveError);
+  test(`a state whose undo count ${name} is rejected`, () => {
+    assert.throws(
+      () => decodeSavedState(encoded({ timeline: [savedState({ undos })] }), BESTS),
+      SaveError
+    );
   });
 }
 

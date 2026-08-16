@@ -25,12 +25,8 @@ export const MAX_BINS = 100;
  * Bins are contiguous and every one of them holds at least one state: the timeline's
  * states are one move apart, so a span of moves cannot have a hole in it. Nothing here
  * has to draw around a bin that has no data.
- *
- * `undos` is keyed by the move play resumed at, which board.js guarantees is a move the
- * timeline still carries. A key outside it is a bug in that guarantee rather than a shape
- * to absorb, so it throws.
  */
-export function binGame(timeline, undos, maxBins = MAX_BINS) {
+export function binGame(timeline, maxBins = MAX_BINS) {
   if (timeline.length === 0) {
     throw new Error("Cannot graph an empty 2048 timeline");
   }
@@ -51,19 +47,12 @@ export function binGame(timeline, undos, maxBins = MAX_BINS) {
     undos: 0,
   }));
 
-  const binOf = (move) => {
-    if (move < firstMove || move > lastMove) {
-      throw new Error(`2048 move ${move} is outside the timeline being graphed`);
-    }
-    return bins[Math.floor((move - firstMove) / width)];
-  };
-
+  // One pass: a state carries both of the figures a bin is made of, so there is nothing
+  // to cross-reference and no way for a count to name a move the timeline does not hold.
   for (const state of timeline) {
-    const bin = binOf(state.moves);
+    const bin = bins[Math.floor((state.moves - firstMove) / width)];
     bin.points = Math.max(bin.points, state.score);
-  }
-  for (const [move, undone] of undos) {
-    binOf(move).undos += undone;
+    bin.undos += state.undos;
   }
 
   return {
