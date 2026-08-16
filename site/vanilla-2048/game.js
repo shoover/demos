@@ -5,6 +5,7 @@
 
 import { SIZE, Game, SaveError, decodeSavedState } from "./board.js";
 import { abbreviate, count } from "./format.js";
+import { binGame } from "./stats.js";
 
 const BEST_SCORE_KEY = "vanilla-2048.bestScore";
 // The best score reached in a game that was played on from an earlier state. A separate
@@ -82,11 +83,28 @@ const elements = {
   latest: document.getElementById("latest"),
   playFromHere: document.getElementById("play-from-here"),
   timelineLabel: document.getElementById("timeline-label"),
+  graph: document.getElementById("graph"),
+  statsPanel: document.getElementById("stats-panel"),
+  chart: document.getElementById("chart"),
+  chartReadout: document.getElementById("chart-readout"),
 };
 
 const compactMedia = window.matchMedia(
   document.getElementById("compact-styles").media
 );
+
+/**
+ * Whether either popup is up, which is the same question as whether play is stopped.
+ *
+ * A popup is opened to read something -- where the game has been, or how it got there --
+ * and both of them cover the board they are about. Playing on underneath is a move made
+ * against a board that cannot be seen, so the game waits: the clock stops, the d-pad goes
+ * flat, and the board is drawn back the same way it is when the past is on screen.
+ * Nothing here refuses the history controls, which are what the popups are for.
+ */
+function popupOpen() {
+  return !elements.timeline.hidden || !elements.statsPanel.hidden;
+}
 
 function setStatus(text, clearAfterMs) {
   elements.status.textContent = text;
@@ -185,9 +203,12 @@ document.addEventListener("visibilitychange", () => playTime.sync());
  * Asked of the newest state rather than of the state on screen, because the clock
  * belongs to the game and not to the board being looked at: it runs whenever the game
  * is under way, however far back the scrubber has been left.
+ *
+ * A popup stops it, because a popup stops play: what is being looked at then is the
+ * history or the graph, and neither is the game running.
  */
 function clockRuns() {
-  return game.latest.moves > 0 && !game.latest.gameOver;
+  return game.latest.moves > 0 && !game.latest.gameOver && !popupOpen();
 }
 
 /* Saving ------------------------------------------------------------------- */
@@ -517,8 +538,9 @@ function paintTimeline() {
     ? `Moves: ${count(game.moves)}`
     : `Move ${count(game.moves)}/${count(game.latest.moves)}`;
   elements.board.classList.toggle("past", !game.atLatest);
+  elements.board.classList.toggle("paused", popupOpen());
   for (const button of dpadButtons) {
-    button.disabled = !game.atLatest;
+    button.disabled = !game.atLatest || popupOpen();
   }
   paintNextMove();
 }
@@ -535,6 +557,9 @@ function paintTimeline() {
  * already put focus where that click meant it to go.
  */
 function setTimelineOpen(open) {
+  if (open && !elements.statsPanel.hidden) {
+    setStatsOpen(false);
+  }
   elements.timeline.hidden = !open;
   elements.timeTravel.setAttribute("aria-expanded", String(open));
   if (open) {
@@ -542,6 +567,21 @@ function setTimelineOpen(open) {
   } else if (elements.timeline.contains(document.activeElement)) {
     elements.timeTravel.focus();
   }
+  syncPlayState();
+}
+
+/**
+ * Stop or take up play, now that a popup has opened or closed.
+ *
+ * The clock is set from the same question everything else asks -- clockRuns -- and from
+ * the seconds already elapsed, so a pause costs nothing and a resume picks up where the
+ * game left off. The panel is repainted through paintTimeline rather than paintPanel,
+ * which would clear whatever the game currently has to say: opening a popup is not news
+ * and must not swallow the news already on screen.
+ */
+function syncPlayState() {
+  playTime.set(playTime.elapsed(), clockRuns());
+  paintTimeline();
 }
 
 /**
@@ -619,6 +659,258 @@ function paintStats() {
     ` | Save p50/90/99: ${saver.summary()}`;
 }
 
+/* Stats graph --------------------------------------------------------------- */
+
+// The gutter is what the two scale labels need; the rest is the smallest margin that
+// keeps a mark off the edge it is drawn against.
+const CHART_GUTTER = 34;
+const CHART_PAD_RIGHT = 4;
+const CHART_PAD_TOP = 6;
+// The moves axis is labelled under the bars, on its own line.
+const CHART_PAD_BOTTOM = 14;
+// Between the two lanes: wide enough that a tall bar and a low line never touch, which
+// is what keeps them reading as two scales rather than one.
+const CHART_LANE_GAP = 10;
+// The share of the plot the bars get. Undos are the smaller story and the sparser mark,
+// and the line is the one being read across the whole game.
+const CHART_UNDO_LANE = 0.3;
+const CHART_LABEL_SIZE = 11;
+const CHART_LABEL_COLOR = "#9fb3c8";
+const CHART_AXIS_COLOR = "rgba(255, 255, 255, 0.14)";
+// Fainter than the baselines: the decades are there to be read against, not followed.
+const CHART_GRID_COLOR = "rgba(255, 255, 255, 0.07)";
+const CHART_HOVER_COLOR = "rgba(255, 255, 255, 0.08)";
+// A bar keeps a 2px gap from its neighbours, and never disappears: a bin with one undo
+// in it is a mark worth seeing at any bin width.
+const CHART_BAR_GAP = 2;
+const CHART_MIN_MARK = 1;
+const CHART_BAR_RADIUS = 2;
+const CHART_LINE_WIDTH = 2;
+// A game one state long is one bin, and a line through one point draws nothing. The
+// single bin is marked instead, at a size that reads as a point rather than as a tile.
+const CHART_POINT_RADIUS = 3;
+
+// Which bin the pointer is over, or null. Kept beside the geometry the last paint used,
+// because the pointer arrives in canvas pixels and only that paint knows what they mean.
+let hoveredBin = null;
+let chartGeometry = null;
+
+/** The bin under a canvas x, or null when the pointer is outside the plot. */
+function binAt(x) {
+  if (chartGeometry === null) {
+    return null;
+  }
+  const { plotLeft, binPixels, binCount } = chartGeometry;
+  const index = Math.floor((x - plotLeft) / binPixels);
+  return index < 0 || index >= binCount ? null : index;
+}
+
+/**
+ * The graph in words: the whole game, or the bin being pointed at.
+ *
+ * Both readings name their span of moves first, so pointing at a bin swaps one sentence
+ * for another of the same shape rather than adding one.
+ */
+function chartReadout(stats) {
+  // The one place a figure here is not a bare number: "1 undos" reads as a bug in a line
+  // that is otherwise plain English.
+  const undos = (total) => `${count(total)} ${total === 1 ? "undo" : "undos"}`;
+  const bin = hoveredBin === null ? null : stats.bins[hoveredBin];
+  if (bin === null) {
+    return (
+      `Moves ${count(stats.firstMove)}-${count(stats.lastMove)}` +
+      `  |  ${count(stats.maxPoints)} points` +
+      `  |  ${undos(stats.totalUndos)}`
+    );
+  }
+  const span =
+    bin.from === bin.to
+      ? `Move ${count(bin.from)}`
+      : `Moves ${count(bin.from)}-${count(bin.to)}`;
+  return `${span}  |  ${count(bin.points)} points  |  ${undos(bin.undos)}`;
+}
+
+/**
+ * Draw the game against the moves it took: points as a line up a log lane, undos as
+ * bars up a linear one.
+ *
+ * Two lanes rather than two scales on one axis. The series answer different questions in
+ * different units -- a running total against a count of events -- and drawing them over
+ * each other on a shared axis is the one way of putting them together that is read wrong
+ * every time: whichever series is scaled to fit looks like it crosses the other. Stacked
+ * lanes give each its own baseline and its own label, and keep the axis they genuinely
+ * share, which is the moves along the bottom.
+ *
+ * Colours come off the legend swatches rather than being written down here, the way the
+ * share image takes its tile colours off the board: the stylesheet stays the one place a
+ * colour is chosen, and the legend cannot end up naming a colour the canvas is not
+ * drawing.
+ *
+ * Cheap enough to run from paintPanel on every move -- a hundred bins is a hundred line
+ * segments -- so nothing has to work out whether the graph has gone stale.
+ */
+function paintChart() {
+  if (elements.statsPanel.hidden) {
+    return;
+  }
+  const canvas = elements.chart;
+  const width = canvas.clientWidth;
+  const height = canvas.clientHeight;
+  // The backing store is the display's pixels, and is resized only when it has to be:
+  // assigning to width or height reallocates and clears it, and this runs on every move.
+  const ratio = window.devicePixelRatio || 1;
+  const [pixelWidth, pixelHeight] = [Math.round(width * ratio), Math.round(height * ratio)];
+  if (canvas.width !== pixelWidth || canvas.height !== pixelHeight) {
+    canvas.width = pixelWidth;
+    canvas.height = pixelHeight;
+  }
+  const context = canvas.getContext("2d");
+  // Set every paint rather than once, since a resize drops it: everything below this is
+  // drawn in CSS pixels and lands on the display's own.
+  context.setTransform(ratio, 0, 0, ratio, 0, 0);
+  context.clearRect(0, 0, width, height);
+
+  const stats = binGame(game.timeline, game.undos);
+  // The bin under the pointer need not have survived: taking moves back shortens the
+  // axis, and the bin that was being read can simply be gone. The pointer is not tracked
+  // between repaints, so there is nothing to re-derive it from -- the graph goes back to
+  // reading out the whole game until the pointer moves and names a bin that exists.
+  if (hoveredBin !== null && hoveredBin >= stats.bins.length) {
+    hoveredBin = null;
+  }
+  const plotLeft = CHART_GUTTER;
+  const plotRight = width - CHART_PAD_RIGHT;
+  const undoBottom = height - CHART_PAD_BOTTOM;
+  const undoHeight = Math.round((undoBottom - CHART_PAD_TOP - CHART_LANE_GAP) * CHART_UNDO_LANE);
+  const undoTop = undoBottom - undoHeight;
+  const lineBottom = undoTop - CHART_LANE_GAP;
+  const binPixels = (plotRight - plotLeft) / stats.bins.length;
+  chartGeometry = { plotLeft, binPixels, binCount: stats.bins.length };
+
+  const centre = (index) => plotLeft + (index + 0.5) * binPixels;
+  // The points lane is logarithmic, because the score is: a game doubles its way up, and
+  // on a linear axis the whole of the early game -- every move up to the first 128 -- is
+  // flat against the baseline while only the last few merges have any height at all. A
+  // log axis gives each doubling the same rise, which is what the line is being read for.
+  //
+  // log1p rather than log, so zero has a place on the axis instead of running off the
+  // bottom of it: a game opens on no points, and plenty of moves score none. It maps zero
+  // to the baseline exactly, and above a handful of points it is a log curve.
+  //
+  // A game worth nothing, or one nothing has been taken back in, has no scale to draw
+  // against. Its lane is empty and its marks sit on the baseline, which is where a zero
+  // belongs; nothing here is guessing at a range it does not have.
+  const pointsAt = (points) =>
+    stats.maxPoints === 0
+      ? lineBottom
+      : lineBottom -
+        (Math.log1p(points) / Math.log1p(stats.maxPoints)) * (lineBottom - CHART_PAD_TOP);
+
+  const font = getComputedStyle(elements.panel).fontFamily;
+  const label = (text, x, y, align) => {
+    context.fillStyle = CHART_LABEL_COLOR;
+    context.font = `${CHART_LABEL_SIZE}px ${font}`;
+    context.textAlign = align;
+    context.textBaseline = "middle";
+    context.fillText(text, x, y);
+  };
+
+  // The bin being pointed at, behind everything: a band rather than a crosshair, since
+  // what is being read off it is a span of moves and not a single one.
+  if (hoveredBin !== null) {
+    context.fillStyle = CHART_HOVER_COLOR;
+    context.fillRect(plotLeft + hoveredBin * binPixels, CHART_PAD_TOP, binPixels, undoBottom - CHART_PAD_TOP);
+  }
+
+  // One baseline per lane and no gridlines: two rules are enough to say where each
+  // series is measured from, and the marks are what the eye should be following.
+  context.fillStyle = CHART_AXIS_COLOR;
+  context.fillRect(plotLeft, lineBottom, plotRight - plotLeft, 1);
+  context.fillRect(plotLeft, undoBottom, plotRight - plotLeft, 1);
+
+  // Each lane says what its top is worth, and says nothing when it is empty rather than
+  // labelling a scale it does not have. Neither says what its bottom is worth: both
+  // baselines are zero, they are drawn, and the lanes are close enough together that a
+  // zero on one sits against the other lane's figure and is read as part of it.
+  const topLabelY = CHART_PAD_TOP + CHART_LABEL_SIZE / 2;
+  if (stats.maxPoints > 0) {
+    label(abbreviate(stats.maxPoints), plotLeft - 6, topLabelY, "right");
+  }
+  // The decades, which are what makes a log lane readable: without them an even rise
+  // says nothing about how much was scored, and the axis could be anything at all. Drawn
+  // faintly and labelled in the same gutter as the peak -- a decade that lands under the
+  // peak's own label is dropped rather than printed over it.
+  for (let decade = 10; decade < stats.maxPoints; decade *= 10) {
+    const y = pointsAt(decade);
+    if (Math.abs(y - topLabelY) < CHART_LABEL_SIZE) {
+      continue;
+    }
+    context.fillStyle = CHART_GRID_COLOR;
+    context.fillRect(plotLeft, y, plotRight - plotLeft, 1);
+    label(abbreviate(decade), plotLeft - 6, y, "right");
+  }
+  if (stats.maxUndos > 0) {
+    label(count(stats.maxUndos), plotLeft - 6, undoTop + CHART_LABEL_SIZE / 2, "right");
+  }
+  label(count(stats.firstMove), plotLeft, undoBottom + CHART_PAD_BOTTOM / 2 + 2, "left");
+  label(count(stats.lastMove), plotRight, undoBottom + CHART_PAD_BOTTOM / 2 + 2, "right");
+
+  // Bars first, so a line that dips into the gap is drawn over them rather than under.
+  context.fillStyle = paintedColor("swatch undos");
+  const barWidth = Math.max(CHART_MIN_MARK, binPixels - CHART_BAR_GAP);
+  for (const [index, bin] of stats.bins.entries()) {
+    if (bin.undos === 0) {
+      continue;
+    }
+    const barHeight = Math.max(CHART_MIN_MARK, (bin.undos / stats.maxUndos) * undoHeight);
+    const x = centre(index) - barWidth / 2;
+    context.beginPath();
+    // Rounded at the end the data reaches and square where it meets its baseline, which
+    // is what keeps a one-move bar from reading as a dot floating over the axis.
+    const radius = Math.min(CHART_BAR_RADIUS, barWidth / 2, barHeight / 2);
+    context.roundRect(x, undoBottom - barHeight, barWidth, barHeight, [radius, radius, 0, 0]);
+    context.fill();
+  }
+
+  context.strokeStyle = paintedColor("swatch points");
+  context.fillStyle = context.strokeStyle;
+  context.lineWidth = CHART_LINE_WIDTH;
+  context.lineJoin = "round";
+  context.lineCap = "round";
+  if (stats.bins.length === 1) {
+    context.beginPath();
+    context.arc(centre(0), pointsAt(stats.bins[0].points), CHART_POINT_RADIUS, 0, Math.PI * 2);
+    context.fill();
+  } else {
+    context.beginPath();
+    for (const [index, bin] of stats.bins.entries()) {
+      context.lineTo(centre(index), pointsAt(bin.points));
+    }
+    context.stroke();
+  }
+
+  elements.chartReadout.textContent = chartReadout(stats);
+}
+
+/**
+ * Show or hide the graph.
+ *
+ * It shares its anchor with the move history, so opening one puts the other away -- and
+ * puts the newest state back on the board with it, which is what dismissing the history
+ * has always meant.
+ */
+function setStatsOpen(open) {
+  if (open && !elements.timeline.hidden) {
+    closeTimeline();
+  }
+  elements.statsPanel.hidden = !open;
+  elements.graph.setAttribute("aria-expanded", String(open));
+  // Whatever was under the pointer belonged to the last time it was open.
+  hoveredBin = null;
+  syncPlayState();
+  paintChart();
+}
+
 // What the game currently has to say, or "" when it has nothing. Kept here rather than
 // read back off the line it is painted into, because that line is only showing it while
 // there is something to show.
@@ -681,6 +973,9 @@ function paintPanel(prefix = "") {
   paintScore();
   paintTimeline();
   paintMessage(prefix);
+  // A no-op unless the graph is open, and the graph is of the whole game rather than of
+  // the state on screen: a move extends it, and taking one back puts a bar on it.
+  paintChart();
 }
 
 /* Sizing ------------------------------------------------------------------- */
@@ -872,7 +1167,10 @@ function playFrom(index, describe) {
 
 function applyMove(direction) {
   const now = performance.now();
-  if (!acceptingInput || now - lastMoveAt < INPUT_THROTTLE_MS) {
+  // Refused while a popup is up, wherever the move came from: the arrow keys and a swipe
+  // reach the board from anywhere on the page, and the board is what the popup is
+  // covering. Closing it is how play is taken up again.
+  if (!acceptingInput || popupOpen() || now - lastMoveAt < INPUT_THROTTLE_MS) {
     return;
   }
 
@@ -995,6 +1293,12 @@ window.addEventListener("keydown", (event) => {
     closeTimeline();
     return;
   }
+  if (event.key === "Escape" && !elements.statsPanel.hidden) {
+    event.preventDefault();
+    setStatsOpen(false);
+    elements.graph.focus();
+    return;
+  }
   const action = KEYS.get(event.key.toLowerCase());
   if (!action) {
     return;
@@ -1023,12 +1327,25 @@ window.addEventListener("keydown", (event) => {
 }, { passive: false });
 
 let touchStart = null;
+// Whether the press now under way is the one that dismissed a popup. A press that puts a
+// popup away is spent on doing that, and the swipe it begins is not also a move -- play
+// was stopped when the finger went down, and closing a popup is how it is taken up, not
+// something that happens halfway through a gesture.
+//
+// A flag rather than a question the swipe handler could ask for itself: touch delivers
+// pointerdown before touchstart, so by the time a gesture is being recorded the popup it
+// began over has already been closed.
+let dismissingPress = false;
 
 elements.main.addEventListener("touchstart", (event) => {
   // Buttons handle their own taps: swallowing the touch here would cost them the
   // click the browser synthesizes from it. The popup is skipped whole, because
   // dragging the scrubber is a swipe by any measure taken here.
-  if (event.touches.length !== 1 || event.target.closest("button, #timeline")) {
+  if (
+    event.touches.length !== 1 ||
+    dismissingPress ||
+    event.target.closest("button, #timeline, #stats-panel")
+  ) {
     touchStart = null;
     return;
   }
@@ -1096,6 +1413,24 @@ onPress(elements.timeTravel, () => {
     closeTimeline();
   }
 });
+onPress(elements.graph, () => setStatsOpen(elements.statsPanel.hidden));
+
+// Pointing at a bin reads it out, and taking the pointer away puts the whole game back.
+// A repaint per bin crossed, which is what the band under the pointer costs; the graph
+// is drawn from scratch on every move anyway.
+elements.chart.addEventListener("pointermove", (event) => {
+  const bin = binAt(event.offsetX);
+  if (bin !== hoveredBin) {
+    hoveredBin = bin;
+    paintChart();
+  }
+});
+elements.chart.addEventListener("pointerleave", () => {
+  if (hoveredBin !== null) {
+    hoveredBin = null;
+    paintChart();
+  }
+});
 elements.latest.addEventListener("click", () => showState(game.timeline.length - 1));
 elements.playFromHere.addEventListener("click", () => {
   playFrom(
@@ -1111,14 +1446,26 @@ elements.scrubber.addEventListener("input", () =>
   showState(Number(elements.scrubber.value))
 );
 
-// Dismissed by a press anywhere else -- the board included, since a swipe there is a
-// move rather than an accident. Not the clock, which has its own press to close, and
-// not the popup itself. Escape closes it too; see the key handler.
+// Dismissed by a press anywhere else -- the board included, which is the quickest way
+// back to playing. Not the clock or the graph button, which have their own press to
+// close, and not the popup itself. Escape closes them too; see the key handler.
+//
+// The press that dismisses does no more than that: it is recorded so the swipe it starts
+// is not delivered as a move, since play was stopped for as long as the popup was up.
 document.addEventListener("pointerdown", (event) => {
   const target = event.target instanceof Element ? event.target : null;
+  let dismissed = false;
   if (!elements.timeline.hidden && target?.closest("#timeline, #time-travel") === null) {
     closeTimeline();
+    dismissed = true;
   }
+  // The graph is dismissed the same way, and by the same press: nothing in it is a
+  // control, so a press anywhere outside it is a press meant for the game.
+  if (!elements.statsPanel.hidden && target?.closest("#stats-panel, #graph") === null) {
+    setStatsOpen(false);
+    dismissed = true;
+  }
+  dismissingPress = dismissed;
 });
 document.getElementById("new-game").addEventListener("click", startNewGame);
 document.getElementById("share").addEventListener("click", () => {
@@ -1281,6 +1628,10 @@ async function share() {
   // the Web Share API on insecure origins -- which is what a phone hitting this page
   // over a LAN IP gets. Save the screenshot instead and name the reason, because
   // "insecure origin" is fixable by serving over localhost or https.
+  //
+  // Inert where this page is published as an Artifact: that viewer refuses a download a
+  // page starts itself, so the link does nothing and the message below overstates what
+  // happened. It works everywhere the demo is served from.
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
   link.href = url;
@@ -1430,7 +1781,13 @@ compactMedia.addEventListener("change", () => {
   paintHelp();
   resizeBoard();
 });
-new ResizeObserver(resizeBoard).observe(elements.main);
+// The chart is redrawn on its own rather than from inside resizeBoard, which returns
+// early when the cell size has not moved: the play area can change width without the
+// board changing size at all, and the graph is as wide as the panel either way.
+new ResizeObserver(() => {
+  resizeBoard();
+  paintChart();
+}).observe(elements.main);
 
 // Only now is there a game to receive input, so a corrupt save leaves input off while
 // the recovery overlay is up.
