@@ -23,3 +23,9 @@ me=$(curl -sf -H "Authorization: Bearer $GITHUB_TOKEN" https://api.github.com/us
 git config user.name "$(printf '%s' "$me" | jq -er '.name // .login')"
 git config user.email \
     "$(printf '%s' "$me" | jq -er '"\(.id)+\(.login)@users.noreply.github.com"')"
+
+# The container signs with an Anthropic-managed key that is not registered
+# on the developer's account, so once the commit is attributed to them
+# GitHub cannot match signature to author and flags it Invalid. An unsigned
+# commit is the honest result: the key is not the developer's to sign with.
+git config commit.gpgsign false
