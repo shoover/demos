@@ -19,6 +19,8 @@ helpers alongside.
   - Capitalized, succint summary of the feature or fixed issue
   - Blank line
   - Succint bullets documenting decisions, tradeoffs, and implementation details.
+  - No co-author or generated-by trailers. The user is responsible for their
+    work.
 
 # Style
 
