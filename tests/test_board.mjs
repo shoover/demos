@@ -12,6 +12,7 @@ import test from "node:test";
 import {
   Game,
   LEGACY_STATE_VERSION,
+  TIMELINE_ONLY_STATE_VERSION,
   SIZE,
   STATE_VERSION,
   SaveError,
@@ -29,7 +30,7 @@ const HUGE_BEST = 10 ** 9;
 const BESTS = { best: HUGE_BEST, replayedBest: HUGE_BEST };
 
 /** Every state's undo count, oldest first: the whole of what a graph would draw. */
-const undosOf = (game) => game.timeline.map((state) => state.undos);
+const undosOf = (game) => game.history.map((entry) => entry.undos);
 
 /** The bounds a game's own save has to be read back against. */
 const bestsOf = (game) => ({ best: game.best, replayedBest: game.replayedBest });
@@ -48,9 +49,10 @@ function newGame(cells = null, best = HUGE_BEST) {
   });
   if (cells !== null) {
     game.cells = cells.map((row) => row.slice());
-    // The fixed board is where this game starts, so it is where its timeline starts:
-    // the state recorded at construction was of the empty board it replaced.
+    // The fixed board is where this game starts, so it is where both of its records
+    // start: what was taken down at construction was of the empty board it replaced.
     game.timeline = [];
+    game.history = [];
     game.record();
   }
   return game;
@@ -72,11 +74,39 @@ function savedState(overrides = {}) {
   };
 }
 
+/**
+ * The history a timeline implies: the same scores, written as the gains between them.
+ *
+ * Derived rather than written out, so a fixture that overrides the timeline still saves
+ * a history that agrees with it -- disagreeing is its own failure, and the tests about
+ * that say so by overriding the history on purpose.
+ */
+function historyFor(timeline) {
+  // The tests about a malformed timeline expect the timeline itself to be what is
+  // rejected, so a fixture that carries one still needs a history to be attached --
+  // any history, since decoding never reaches it.
+  if (
+    !Array.isArray(timeline) ||
+    timeline.length === 0 ||
+    timeline[0] === null ||
+    typeof timeline[0] !== "object"
+  ) {
+    return { from: 0, score: 0, gains: [] };
+  }
+  return {
+    from: timeline[0].moves,
+    score: timeline[0].score,
+    gains: timeline.slice(1).map((state, index) => state.score - timeline[index].score),
+  };
+}
+
 /** A whole save, holding a one-state timeline unless told otherwise. */
 function encoded(overrides = {}) {
+  const timeline = overrides.timeline ?? [savedState()];
   return JSON.stringify({
     version: STATE_VERSION,
-    timeline: [savedState()],
+    timeline,
+    history: historyFor(timeline),
     cursor: 0,
     play_seconds: 12.5,
     ...overrides,
@@ -589,20 +619,22 @@ test("a new game starts with no undos", () => {
   assert.deepEqual(undosOf(game), [0]);
 });
 
-test("tallies are dropped with the states they were counted against", () => {
+test("tallies outlive the states they were counted against", () => {
   const game = replayable();
   game.playFrom(2);
   game.playFrom(1);
   assert.deepEqual(undosOf(game), [0, 2]);
 
-  // Far enough for the trim to run past both: the graph has no axis position for a move
-  // the timeline no longer carries, so the tally goes with it.
+  // Far enough for the trim to run past both. The tally belongs to the move, and the
+  // history still has that move, so the graph still has a column to draw it in -- the
+  // boards being gone only costs the scrubber its reach.
   for (let extra = 0; extra < TIMELINE_LIMIT + 10; extra += 1) {
     game.moves += 1;
     game.record();
   }
-  assert.ok(game.timeline.every((state) => state.undos === 0));
-  assert.ok(game.timeline[0].moves > 2);
+  assert.ok(game.timeline[0].moves > 1, "the timeline has trimmed past the tallied move");
+  assert.equal(game.history[0].moves, 0, "the history still opens on the first move");
+  assert.equal(game.history[1].undos, 2, "and still carries the count");
 });
 
 /* Best scores ----------------------------------------------------------------- */
@@ -772,6 +804,68 @@ test("a state saved without its move reads back with none", () => {
   assert.equal(decodeSavedState(game.encode(1), bestsOf(game)).timeline[0].direction, null);
 });
 
+test("the history outlives the timeline through a save", () => {
+  const played = newGame();
+  played.reset();
+  for (let extra = 0; extra < TIMELINE_LIMIT + 50; extra += 1) {
+    played.score += 4;
+    played.moves += 1;
+    played.setOwnBest(played.score);
+    played.record("left");
+  }
+  played.playFrom(played.timeline.length - 3);
+
+  const restored = newGame(null, played.best);
+  restored.restore(decodeSavedState(played.encode(60), bestsOf(played)));
+  assert.equal(restored.timeline.length, played.timeline.length);
+  assert.ok(restored.timeline.length <= TIMELINE_LIMIT);
+  assert.deepEqual(restored.history, played.history);
+  // The point of keeping it: the record still opens on the first move of the game,
+  // long after the boards for that move were trimmed away.
+  assert.equal(restored.history[0].moves, 0);
+  assert.ok(restored.timeline[0].moves > 0);
+});
+
+test("the history costs a fraction of what the timeline does", () => {
+  // Why the whole game can be kept when the boards cannot: an entry is a couple of
+  // numbers where a state is a board. If this ever stops being true, keeping every
+  // move stops being free and the trade-off behind it needs revisiting.
+  const game = newGame();
+  game.reset();
+  for (let extra = 0; extra < TIMELINE_LIMIT; extra += 1) {
+    game.score += 4;
+    game.moves += 1;
+    game.setOwnBest(game.score);
+    game.record("left");
+  }
+  const saved = JSON.parse(game.encode(30));
+  const timelineBytes = JSON.stringify(saved.timeline).length;
+  const historyBytes = JSON.stringify(saved.history).length;
+  assert.ok(
+    historyBytes * 10 < timelineBytes,
+    `history ${historyBytes} B is not an order of magnitude under timeline ${timelineBytes} B`
+  );
+});
+
+test("a version 2 save opens on the history its timeline can supply", () => {
+  // No history was stored before version 3, so what the timeline holds is all there is.
+  // The game opens rather than being called corrupt, and carries its old tallies over.
+  const legacy = JSON.stringify({
+    version: TIMELINE_ONLY_STATE_VERSION,
+    timeline: [
+      savedState({ moves: 7, score: 100 }),
+      savedState({ moves: 8, score: 108, undos: 2 }),
+    ],
+    cursor: 1,
+    play_seconds: 12.5,
+  });
+  const saved = decodeSavedState(legacy, BESTS);
+  assert.deepEqual(
+    saved.history,
+    [{ moves: 7, score: 100, undos: 0 }, { moves: 8, score: 108, undos: 2 }]
+  );
+});
+
 test("undo tallies survive a round trip through the save format", () => {
   const played = replayable();
   played.playFrom(2);
@@ -783,11 +877,10 @@ test("undo tallies survive a round trip through the save format", () => {
   assert.ok(undosOf(played).some(Boolean), "the game under test took something back");
 });
 
-test("a state saved without a count reads back with none", () => {
-  // Every state of nearly every game: the field is left out where it is zero, and no
-  // save written before undos were counted has it at all.
+test("a history saved without any counts reads back with none", () => {
+  // Nearly every game: the field is left out where every count would be zero.
   const saved = decodeSavedState(encoded(), BESTS);
-  assert.deepEqual(saved.timeline.map((state) => state.undos), [0]);
+  assert.deepEqual(saved.history.map((entry) => entry.undos), [0]);
 
   const game = newGame();
   game.restore(saved);
@@ -799,13 +892,50 @@ for (const [name, undos] of [
   ["is negative", -1],
   ["is not a number", "two"],
 ]) {
-  test(`a state whose undo count ${name} is rejected`, () => {
+  test(`a history whose undo count ${name} is rejected`, () => {
     assert.throws(
-      () => decodeSavedState(encoded({ timeline: [savedState({ undos })] }), BESTS),
+      () => decodeSavedState(encoded({ history: { from: 7, score: 100, gains: [], undos: { 7: undos } } }), BESTS),
       SaveError
     );
   });
 }
+
+test("a history that does not end where its timeline does is rejected", () => {
+  assert.throws(
+    () => decodeSavedState(encoded({ history: { from: 7, score: 99, gains: [] } }), BESTS),
+    SaveError
+  );
+});
+
+test("a history that starts after its timeline is rejected", () => {
+  // The history is the longer record by construction. One that opens later than the
+  // timeline is describing a different game, not a shorter one.
+  const timeline = [savedState({ moves: 7, score: 100 }), savedState({ moves: 8, score: 108 })];
+  assert.throws(
+    () => decodeSavedState(
+      encoded({ timeline, history: { from: 8, score: 108, gains: [] } }), BESTS
+    ),
+    SaveError
+  );
+});
+
+test("a history whose gain runs the score backwards is rejected", () => {
+  assert.throws(
+    () => decodeSavedState(
+      encoded({ history: { from: 5, score: 120, gains: [-20, 0] } }), BESTS
+    ),
+    SaveError
+  );
+});
+
+test("an undo counted against a move outside the history is rejected", () => {
+  assert.throws(
+    () => decodeSavedState(
+      encoded({ history: { from: 7, score: 100, gains: [], undos: { 99: 1 } } }), BESTS
+    ),
+    SaveError
+  );
+});
 
 test("a replayed game comes back knowing which move it was played on from", () => {
   const played = replayable();

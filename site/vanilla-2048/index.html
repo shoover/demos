@@ -44,6 +44,7 @@
          under every kind of colour blindness. Here rather than on the popup because the
          script reads them back off an off-screen swatch, which is not inside it. */
       --series-points: #3987e5;
+      --series-gained: #35a06a;
       --series-undos: #d95926;
     }
 
@@ -508,6 +509,7 @@
     }
 
     .swatch.points { height: 2px; background: var(--series-points); }
+    .swatch.gained { height: 8px; background: var(--series-gained); }
     .swatch.undos { height: 8px; background: var(--series-undos); }
 
     /* Sized here and redrawn at the device's pixels by the script, which is why the
@@ -516,7 +518,7 @@
     #chart {
       display: block;
       width: 100%;
-      height: 132px;
+      height: 176px;
       /* The board reads swipes anywhere in `main`, so pointing at a bin would otherwise
          also be a move; the swipe handler skips this popup for the same reason. */
       touch-action: none;
@@ -584,7 +586,7 @@
     main { padding: 6px; }
     #panel { font-size: 13px; }
     #board-wrap { margin: 2px 0; }
-    #chart { height: 108px; }
+    #chart { height: 148px; }
     #chart-legend, #chart-readout { font-size: 11px; }
     #overlay { inset: 8px; max-width: calc(100% - 16px); padding: 8px 10px; border-radius: 8px; font-size: 12px; }
   </style>
@@ -703,9 +705,10 @@
                the two colours the canvas reads back off them. -->
           <p id="chart-legend">
             <span class="legend-entry"><span class="swatch points"></span>Points</span>
+            <span class="legend-entry"><span class="swatch gained"></span>Gained</span>
             <span class="legend-entry"><span class="swatch undos"></span>Undos</span>
           </p>
-          <canvas id="chart" role="img" aria-label="Points and undos by move"></canvas>
+          <canvas id="chart" role="img" aria-label="Points, points gained and undos by move"></canvas>
           <!-- The graph in words: the whole game until a bin is pointed at, then that
                bin. A canvas cannot be read by a screen reader and a hovered tooltip
                cannot be read at all, so the reading lives on a line of its own. -->
