@@ -16,14 +16,21 @@
  */
 
 export const SIZE = 4;
-export const STATE_VERSION = 2;
-// Version 1 stored a single state, from before the game kept a timeline. Still read,
-// so a game saved by the previous build reopens rather than being called corrupt.
+export const STATE_VERSION = 3;
+// Version 1 stored a single state, from before the game kept a timeline. Version 2 kept
+// the timeline but nothing behind it, so a graph could only ever show the moves the
+// timeline still held. Both are still read, so a game saved by a previous build reopens
+// rather than being called corrupt.
 export const LEGACY_STATE_VERSION = 1;
-// States kept per game. The whole timeline is rewritten on every save, so it has to be
+export const TIMELINE_ONLY_STATE_VERSION = 2;
+const READABLE_VERSIONS = [STATE_VERSION, TIMELINE_ONLY_STATE_VERSION, LEGACY_STATE_VERSION];
+// Boards kept per game. The whole timeline is rewritten on every save, so it has to be
 // bounded by something. A full one measures 92 KB, which encodes in 0.6ms and stores in
 // 0.4ms -- a fraction of a frame on the move that writes it, and a fraction of the 5 MB
 // localStorage usually offers.
+//
+// This bounds how far back the scrubber reaches, and nothing else. What the graph is
+// drawn from is the history below, which is kept whole.
 export const TIMELINE_LIMIT = 1000;
 const FOUR_SPAWN_CHANCE = 0.1;
 const DIRECTIONS = ["up", "down", "left", "right"];
@@ -205,21 +212,35 @@ export function arrivalCells(previous, direction, cells) {
  * What a reader usually wants is the other way round -- the move played *from* a state,
  * which is the direction on the state after it; Game.nextDirection does that lookup.
  *
- * `undos` defaults to none, which is what a state being recorded for the first time has;
- * a state read back from a save brings its own count along.
- *
  * Copied on the way in, so a recorded state can never share a row with the live board
  * and be played on after the fact.
+ *
+ * Carries no undo tally. The count belongs to a move, and a move outlives the board that
+ * reached it: the timeline is trimmed at TIMELINE_LIMIT, so a tally kept here is thrown
+ * away with the oldest states while the move it counted is still on the graph. It lives
+ * on the history instead, which is not trimmed.
  */
-function captureState({ cells, score, moves, gameOver, undos = 0 }, direction = null) {
+function captureState({ cells, score, moves, gameOver }, direction = null) {
   return {
     cells: cells.map((row) => row.slice()),
     score,
     moves,
     gameOver,
     direction,
-    undos,
   };
+}
+
+/**
+ * One move's worth of the record the graph is drawn from: what the score stood at, and
+ * how many times play has been taken back to it.
+ *
+ * This is the whole game and stays that way -- one entry per move from the opening board
+ * on, however long the game runs. It is affordable because it holds no board: a state
+ * costs 92 bytes to store, an entry here costs about five, so a game long enough to fill
+ * the timeline twice over still writes less than the timeline does.
+ */
+function historyEntry(moves, score, undos = 0) {
+  return { moves, score, undos };
 }
 
 /**
@@ -243,10 +264,6 @@ function decodeState(entry, best, previous) {
   // save written before directions were tracked has none of them at all. All three are
   // the same thing to a reader -- a state whose next move cannot be shown.
   const direction = entry.direction ?? null;
-  // Absent as well as zero: a state nothing has ever been taken back to does not write
-  // the field, and no save written before undos were counted has it either.
-  const undos = requireNonNegativeInt(entry.undos ?? 0, "undo count");
-
   if (direction !== null && !DIRECTIONS.includes(direction)) {
     throw new SaveError(
       `Invalid saved 2048 move direction: ${JSON.stringify(direction)}`
@@ -267,7 +284,10 @@ function decodeState(entry, best, previous) {
     throw new SaveError(`Saved 2048 timeline does not run forward at move ${moves}`);
   }
 
-  return { cells, score, moves, gameOver, direction, undos };
+  // Exactly what captureState holds, so a timeline read back from a save and one the
+  // game recorded itself are the same thing. The undo tally is not here: it belongs to
+  // the move rather than to the board, and lives on the history.
+  return { cells, score, moves, gameOver, direction };
 }
 
 /**
@@ -285,6 +305,87 @@ function savedStates(state) {
     throw new SaveError("Invalid saved 2048 timeline");
   }
   return state.timeline;
+}
+
+/**
+ * The score history a save carries, oldest move first.
+ *
+ * Stored as the points each move gained rather than as the totals themselves, because
+ * gains are what the graph's second series is and the totals are their running sum:
+ * writing the totals would mean storing a figure that grows to seven digits a thousand
+ * times over, when what changed each move fits in two.
+ *
+ * A version 1 or 2 save has no history behind its timeline. What the timeline holds is
+ * then the whole of what is known -- the earlier moves went with the states that carried
+ * them -- so it reads back as a history that starts where the timeline does. That game's
+ * graph opens on the moves it has, exactly as it did before, and every move played from
+ * here on is recorded.
+ */
+function decodeHistory(state, timeline) {
+  if (state.version !== STATE_VERSION) {
+    // A version 2 save kept its undo tallies on the timeline's states, which is where
+    // they were before they had anywhere better to be. Read them off the stored entries
+    // rather than off the decoded states, which no longer carry them.
+    const stored = savedStates(state);
+    return timeline.map((entry, index) =>
+      historyEntry(
+        entry.moves,
+        entry.score,
+        requireNonNegativeInt(stored[index].undos ?? 0, "undo count")
+      )
+    );
+  }
+
+  const stored = state.history;
+  if (stored === null || typeof stored !== "object" || Array.isArray(stored)) {
+    throw new SaveError("Invalid saved 2048 history");
+  }
+  const from = requireNonNegativeInt(stored.from, "history start");
+  let score = requireNonNegativeInt(stored.score, "history opening score");
+  if (!Array.isArray(stored.gains)) {
+    throw new SaveError("Invalid saved 2048 history gains");
+  }
+
+  // Keyed by move rather than by position, so a tally names the move it belongs to and
+  // survives being read back against a history that starts somewhere else.
+  const undos = new Map();
+  for (const [move, count] of Object.entries(stored.undos ?? {})) {
+    const at = requireNonNegativeInt(Number(move), "history undo move");
+    undos.set(at, requireNonNegativeInt(count, "history undo count"));
+  }
+
+  const history = [historyEntry(from, score, undos.get(from) ?? 0)];
+  for (const [index, gain] of stored.gains.entries()) {
+    // A move never loses points, so a negative gain is a corrupt save rather than a
+    // score that went down.
+    score += requireNonNegativeInt(gain, "history gain");
+    const moves = from + index + 1;
+    history.push(historyEntry(moves, score, undos.get(moves) ?? 0));
+  }
+
+  // The history and the timeline are two records of one game, so they have to agree
+  // about it: the history has to reach at least as far back as the timeline does, and
+  // both have to end on the same move with the same score.
+  const latest = timeline[timeline.length - 1];
+  const last = history[history.length - 1];
+  if (from > timeline[0].moves) {
+    throw new SaveError(
+      `Saved 2048 history starts at move ${from}, after its timeline's ${timeline[0].moves}`
+    );
+  }
+  if (last.moves !== latest.moves || last.score !== latest.score) {
+    throw new SaveError(
+      `Saved 2048 history ends at move ${last.moves} scoring ${last.score}, ` +
+      `its timeline at move ${latest.moves} scoring ${latest.score}`
+    );
+  }
+  for (const at of undos.keys()) {
+    if (at < from || at > last.moves) {
+      throw new SaveError(`Saved 2048 history undo names move ${at}, outside its history`);
+    }
+  }
+
+  return history;
 }
 
 /**
@@ -309,7 +410,7 @@ export function decodeSavedState(serialized, { best, replayedBest }) {
   if (state === null || typeof state !== "object" || Array.isArray(state)) {
     throw new SaveError("Invalid saved 2048 game state");
   }
-  if (state.version !== STATE_VERSION && state.version !== LEGACY_STATE_VERSION) {
+  if (!READABLE_VERSIONS.includes(state.version)) {
     throw new SaveError("Unsupported saved 2048 game state version");
   }
 
@@ -354,7 +455,7 @@ export function decodeSavedState(serialized, { best, replayedBest }) {
     );
   }
 
-  return { timeline, cursor, playSeconds, replayedFrom };
+  return { timeline, history: decodeHistory(state, timeline), cursor, playSeconds, replayedFrom };
 }
 
 /**
@@ -363,7 +464,14 @@ export function decodeSavedState(serialized, { best, replayedBest }) {
  * The best scores are carried here because they are a function of the score, but
  * persisting them is the caller's job: every move reports whether one changed.
  *
- * Every state the game has been in is kept, oldest first, in `timeline`; `cells` and
+ * Two records of the same game are kept, because they are wanted for different things
+ * and cost different amounts. `timeline` holds boards, so it is what the scrubber walks
+ * and what an earlier position is played from -- and it is expensive, so it is capped.
+ * `history` holds one entry per move: the score it reached and the undos taken back to
+ * it, no board. That is what the graph is drawn from, it is cheap enough to keep whole,
+ * and so the graph shows the entire game however far back the scrubber can no longer go.
+ *
+ * The newest TIMELINE_LIMIT states are kept, oldest first, in `timeline`; `cells` and
  * the counters beside it are always the state at `cursor`. Seeking moves the cursor
  * back through the timeline to look at an earlier board. Play resumes from the newest
  * state, and from any other only by way of playFrom, which makes the state it resumes
@@ -386,6 +494,9 @@ export class Game {
     // Recorded straight away, so the cursor indexes a real state from construction on
     // and no caller has to special-case a game that has not been played yet.
     this.timeline = [captureState(this)];
+    // The opening board is move 0 and belongs on the graph like any other: it is where
+    // the points line starts from.
+    this.history = [historyEntry(0, 0)];
     this.cursor = 0;
   }
 
@@ -486,6 +597,7 @@ export class Game {
     const spawned = [this.spawnTile(), this.spawnTile()];
     // A new game is a new timeline: the old one belonged to a game that is over.
     this.timeline = [captureState(this)];
+    this.history = [historyEntry(0, 0)];
     this.cursor = 0;
     return spawned;
   }
@@ -495,7 +607,9 @@ export class Game {
    * cursor on it.
    *
    * Trimming from the front is what bounds the save; the states dropped are the oldest
-   * ones, so the scrubber loses its earliest reach rather than its most recent.
+   * ones, so the scrubber loses its earliest reach rather than its most recent. The
+   * history is appended to and never trimmed, so what the graph can draw is not what
+   * the scrubber can reach.
    */
   record(direction = null) {
     this.timeline.push(captureState(this, direction));
@@ -503,6 +617,12 @@ export class Game {
       this.timeline.shift();
     }
     this.cursor = this.timeline.length - 1;
+    this.history.push(historyEntry(this.moves, this.score));
+  }
+
+  /** Where `moves` sits in the history, which need not start at move 0 after a restore. */
+  historyIndex(moves) {
+    return moves - this.history[0].moves;
   }
 
   /**
@@ -554,11 +674,13 @@ export class Game {
     // with them. Undo pressed twice in a row is the ordinary way to reach that: the
     // first press counts against a state the second one then takes back, and dropping
     // it would erase the record of the first press.
-    const undone = this.timeline
-      .slice(landed + 1)
-      .reduce((sum, state) => sum + state.undos, 1);
+    const at = this.historyIndex(this.moves);
+    const undone = this.history
+      .slice(at + 1)
+      .reduce((sum, entry) => sum + entry.undos, 1);
     this.timeline.length = landed + 1;
-    this.timeline[landed].undos += undone;
+    this.history.length = at + 1;
+    this.history[at].undos += undone;
     // The clean best comes across rather than being left behind: those points were
     // really scored, before this game had rewritten anything, so taking a move back must
     // not cost a total that had actually been reached. It also puts the replayed track
@@ -636,6 +758,9 @@ export class Game {
 
   restore(saved) {
     this.timeline = saved.timeline.map((state) => captureState(state, state.direction));
+    this.history = saved.history.map((entry) =>
+      historyEntry(entry.moves, entry.score, entry.undos)
+    );
     this.replayedFrom = saved.replayedFrom ?? null;
     this.seek(saved.cursor);
   }
@@ -650,11 +775,20 @@ export class Game {
         moves: state.moves,
         game_over: state.gameOver,
         direction: state.direction,
-        // Left out where there are none, which is nearly every state of nearly every
-        // game: the timeline is rewritten whole on every save, so a field that is zero
-        // a thousand times over is worth not writing.
-        ...(state.undos > 0 && { undos: state.undos }),
       })),
+      history: {
+        from: this.history[0].moves,
+        score: this.history[0].score,
+        gains: this.history.slice(1).map((entry, index) => entry.score - this.history[index].score),
+        // Left out where there are none, which is nearly every move of nearly every
+        // game: the history is rewritten whole on every save, so a field that is zero
+        // thousands of times over is worth not writing.
+        ...(this.history.some((entry) => entry.undos > 0) && {
+          undos: Object.fromEntries(
+            this.history.filter((entry) => entry.undos > 0).map((entry) => [entry.moves, entry.undos])
+          ),
+        }),
+      },
       cursor: this.cursor,
       // Added to the format rather than versioned into it: a reader that does not know
       // the field ignores it and still opens the game, which is what an older build

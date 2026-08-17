@@ -671,17 +671,23 @@ const CHART_PAD_RIGHT = 4;
 const CHART_PAD_TOP = 6;
 // The moves axis is labelled under the bars, on its own line.
 const CHART_PAD_BOTTOM = 14;
-// Between the two lanes: wide enough that a tall bar and a low line never touch, which
-// is what keeps them reading as two scales rather than one.
-const CHART_LANE_GAP = 10;
-// The share of the plot the bars get. Undos are the smaller story and the sparser mark,
-// and the line is the one being read across the whole game.
-const CHART_UNDO_LANE = 0.3;
+// Between the lanes: wide enough that a tall bar and a low line never touch, which is
+// what keeps them reading as separate scales rather than one.
+const CHART_LANE_GAP = 8;
+// The share of the plot each lane gets, top to bottom, after the gaps are taken out.
+// The total is the line being read across the whole game, so it is the tallest; the
+// gains are the series with something to say in every bin, so they are close behind;
+// undos are the sparsest mark and the smallest story.
+const CHART_LANES = { points: 0.44, gained: 0.32, undos: 0.24 };
 const CHART_LABEL_SIZE = 11;
 const CHART_LABEL_COLOR = "#9fb3c8";
 const CHART_AXIS_COLOR = "rgba(255, 255, 255, 0.14)";
-// Fainter than the baselines: the decades are there to be read against, not followed.
+// Fainter than the baselines: the gridlines are there to be read against, not followed.
 const CHART_GRID_COLOR = "rgba(255, 255, 255, 0.07)";
+// Gridlines per lane, near enough: a round step landing about this many rules up is
+// enough to read a height off and few enough that the marks stay the thing being seen.
+// Two, because a lane is a third of a short popup: at three the labels touch.
+const CHART_GRID_STEPS = 2;
 const CHART_HOVER_COLOR = "rgba(255, 255, 255, 0.08)";
 // A bar keeps a 2px gap from its neighbours, and never disappears: a bin with one undo
 // in it is a mark worth seeing at any bin width.
@@ -730,19 +736,33 @@ function chartReadout(stats) {
     bin.from === bin.to
       ? `Move ${count(bin.from)}`
       : `Moves ${count(bin.from)}-${count(bin.to)}`;
-  return `${span}  |  ${count(bin.points)} points  |  ${undos(bin.undos)}`;
+  // A bin says what was gained in it as well as what the game stood at, because that is
+  // the difference between the two series and the reason both are drawn.
+  return (
+    `${span}  |  ${count(bin.points)} points` +
+    `  |  +${count(bin.gained)}  |  ${undos(bin.undos)}`
+  );
 }
 
 /**
- * Draw the game against the moves it took: points as a line up a log lane, undos as
- * bars up a linear one.
+ * Draw the game against the moves it took: the running total as a line, the points each
+ * span gained as bars under it, and the undos as bars under those.
  *
- * Two lanes rather than two scales on one axis. The series answer different questions in
- * different units -- a running total against a count of events -- and drawing them over
- * each other on a shared axis is the one way of putting them together that is read wrong
- * every time: whichever series is scaled to fit looks like it crosses the other. Stacked
- * lanes give each its own baseline and its own label, and keep the axis they genuinely
- * share, which is the moves along the bottom.
+ * Three lanes rather than three scales on one axis. The series answer different
+ * questions in different units -- a running total, a rate, a count of events -- and
+ * drawing them over each other on a shared axis is the one way of putting them together
+ * that is read wrong every time: whichever series is scaled to fit looks like it crosses
+ * the others. Stacked lanes give each its own baseline and its own label, and keep the
+ * axis they genuinely share, which is the moves along the bottom.
+ *
+ * Every lane is linear, the total's included. A log lane was the right answer when the
+ * total was the only points series there was: a game doubles its way up, and on a linear
+ * axis the whole of the early game is flat against the baseline. But it buys that at the
+ * far end, where a running total spends the rest of a long game pinned against its own
+ * peak -- past the first quarter of the moves, a log lane is a horizontal line. The gains
+ * lane is what now carries the early game, doubling by doubling, and it carries the late
+ * game too; with that drawn, the total is wanted for the one thing a total is good for,
+ * which is its shape, and a linear lane draws that honestly at both ends.
  *
  * Colours come off the legend swatches rather than being written down here, the way the
  * share image takes its tile colours off the board: the stylesheet stays the one place a
@@ -773,7 +793,9 @@ function paintChart() {
   context.setTransform(ratio, 0, 0, ratio, 0, 0);
   context.clearRect(0, 0, width, height);
 
-  const stats = binGame(game.timeline);
+  // Binned from the history, not the timeline: the timeline is capped, so binning it
+  // would draw the newest thousand moves and call them the game.
+  const stats = binGame(game.history);
   // The bin under the pointer need not have survived: taking moves back shortens the
   // axis, and the bin that was being read can simply be gone. The pointer is not tracked
   // between repaints, so there is nothing to re-derive it from -- the graph goes back to
@@ -783,31 +805,40 @@ function paintChart() {
   }
   const plotLeft = CHART_GUTTER;
   const plotRight = width - CHART_PAD_RIGHT;
-  const undoBottom = height - CHART_PAD_BOTTOM;
-  const undoHeight = Math.round((undoBottom - CHART_PAD_TOP - CHART_LANE_GAP) * CHART_UNDO_LANE);
-  const undoTop = undoBottom - undoHeight;
-  const lineBottom = undoTop - CHART_LANE_GAP;
+  const plotBottom = height - CHART_PAD_BOTTOM;
   const binPixels = (plotRight - plotLeft) / stats.bins.length;
   chartGeometry = { plotLeft, binPixels, binCount: stats.bins.length };
 
+  // The lanes, stacked top to bottom, each given its share of what the gaps leave over.
+  const names = Object.keys(CHART_LANES);
+  const laneRoom = plotBottom - CHART_PAD_TOP - CHART_LANE_GAP * (names.length - 1);
+  const lanes = {};
+  let laneTop = CHART_PAD_TOP;
+  for (const [index, name] of names.entries()) {
+    // The last lane is measured from the bottom rather than given its share, so the
+    // rounding the ones above it leave over lands inside it instead of pushing its
+    // baseline past the plot and out from under the axis labels.
+    const bottom =
+      index === names.length - 1
+        ? plotBottom
+        : laneTop + Math.round(laneRoom * CHART_LANES[name]);
+    lanes[name] = { top: laneTop, bottom, height: bottom - laneTop };
+    laneTop = bottom + CHART_LANE_GAP;
+  }
+
   const centre = (index) => plotLeft + (index + 0.5) * binPixels;
-  // The points lane is logarithmic, because the score is: a game doubles its way up, and
-  // on a linear axis the whole of the early game -- every move up to the first 128 -- is
-  // flat against the baseline while only the last few merges have any height at all. A
-  // log axis gives each doubling the same rise, which is what the line is being read for.
-  //
-  // log1p rather than log, so zero has a place on the axis instead of running off the
-  // bottom of it: a game opens on no points, and plenty of moves score none. It maps zero
-  // to the baseline exactly, and above a handful of points it is a log curve.
-  //
-  // A game worth nothing, or one nothing has been taken back in, has no scale to draw
-  // against. Its lane is empty and its marks sit on the baseline, which is where a zero
-  // belongs; nothing here is guessing at a range it does not have.
+  /**
+   * Where a value sits in its lane, measured from that lane's own baseline.
+   *
+   * A lane whose series is worth nothing -- a game that has scored nothing, one nothing
+   * has been taken back in -- has no scale to draw against. Its marks sit on the
+   * baseline, which is where a zero belongs; nothing here is guessing at a range it
+   * does not have.
+   */
+  const heightIn = (lane, value, max) =>
+    max === 0 ? 0 : (value / max) * (lane.height - CHART_LABEL_SIZE / 2);
   const pointsAt = (points) =>
-    stats.maxPoints === 0
-      ? lineBottom
-      : lineBottom -
-        (Math.log1p(points) / Math.log1p(stats.maxPoints)) * (lineBottom - CHART_PAD_TOP);
+    lanes.points.bottom - heightIn(lanes.points, points, stats.maxPoints);
 
   const font = getComputedStyle(elements.panel).fontFamily;
   const label = (text, x, y, align) => {
@@ -822,58 +853,90 @@ function paintChart() {
   // what is being read off it is a span of moves and not a single one.
   if (hoveredBin !== null) {
     context.fillStyle = CHART_HOVER_COLOR;
-    context.fillRect(plotLeft + hoveredBin * binPixels, CHART_PAD_TOP, binPixels, undoBottom - CHART_PAD_TOP);
+    context.fillRect(plotLeft + hoveredBin * binPixels, CHART_PAD_TOP, binPixels, plotBottom - CHART_PAD_TOP);
   }
 
-  // One baseline per lane and no gridlines: two rules are enough to say where each
-  // series is measured from, and the marks are what the eye should be following.
+  // One baseline per lane: three rules are enough to say where each series is measured
+  // from, and the marks are what the eye should be following.
   context.fillStyle = CHART_AXIS_COLOR;
-  context.fillRect(plotLeft, lineBottom, plotRight - plotLeft, 1);
-  context.fillRect(plotLeft, undoBottom, plotRight - plotLeft, 1);
-
-  // Each lane says what its top is worth, and says nothing when it is empty rather than
-  // labelling a scale it does not have. Neither says what its bottom is worth: both
-  // baselines are zero, they are drawn, and the lanes are close enough together that a
-  // zero on one sits against the other lane's figure and is read as part of it.
-  const topLabelY = CHART_PAD_TOP + CHART_LABEL_SIZE / 2;
-  if (stats.maxPoints > 0) {
-    label(abbreviate(stats.maxPoints), plotLeft - 6, topLabelY, "right");
+  for (const lane of Object.values(lanes)) {
+    context.fillRect(plotLeft, lane.bottom, plotRight - plotLeft, 1);
   }
-  // The decades, which are what makes a log lane readable: without them an even rise
-  // says nothing about how much was scored, and the axis could be anything at all. Drawn
-  // faintly and labelled in the same gutter as the peak -- a decade that lands under the
-  // peak's own label is dropped rather than printed over it.
-  for (let decade = 10; decade < stats.maxPoints; decade *= 10) {
-    const y = pointsAt(decade);
-    if (Math.abs(y - topLabelY) < CHART_LABEL_SIZE) {
-      continue;
+
+  /**
+   * Label a lane's peak, and rule the round steps below it.
+   *
+   * A lane says what its top is worth, and says nothing when it is empty rather than
+   * labelling a scale it does not have. None of them says what its bottom is worth:
+   * every baseline is zero, they are drawn, and the lanes are close enough together
+   * that a zero on one sits against the next lane's figure and is read as part of it.
+   *
+   * The steps are what makes a linear lane readable: without them an even rise says
+   * nothing about how much was scored. A step landing under the peak's own label is
+   * dropped rather than printed over it.
+   */
+  const scaleLane = (lane, max, at) => {
+    if (max === 0) {
+      return;
     }
-    context.fillStyle = CHART_GRID_COLOR;
-    context.fillRect(plotLeft, y, plotRight - plotLeft, 1);
-    label(abbreviate(decade), plotLeft - 6, y, "right");
+    const peakY = lane.bottom - heightIn(lane, max, max);
+    label(abbreviate(max), plotLeft - 6, peakY, "right");
+    const rough = max / CHART_GRID_STEPS;
+    const magnitude = Math.pow(10, Math.floor(Math.log10(rough)));
+    const normalised = rough / magnitude;
+    const step = (normalised >= 5 ? 5 : normalised >= 2 ? 2 : 1) * magnitude;
+    for (let value = step; value < max; value += step) {
+      const y = at(value);
+      if (Math.abs(y - peakY) < CHART_LABEL_SIZE) {
+        continue;
+      }
+      context.fillStyle = CHART_GRID_COLOR;
+      context.fillRect(plotLeft, y, plotRight - plotLeft, 1);
+      label(abbreviate(value), plotLeft - 6, y, "right");
+    }
+  };
+
+  scaleLane(lanes.points, stats.maxPoints, pointsAt);
+  // The lower two lanes are short enough that a peak label and a step would crowd each
+  // other, so they get the figure that says what the lane is worth and no rules.
+  if (stats.maxGained > 0) {
+    label(abbreviate(stats.maxGained), plotLeft - 6, lanes.gained.top + CHART_LABEL_SIZE / 2, "right");
   }
   if (stats.maxUndos > 0) {
-    label(count(stats.maxUndos), plotLeft - 6, undoTop + CHART_LABEL_SIZE / 2, "right");
+    label(count(stats.maxUndos), plotLeft - 6, lanes.undos.top + CHART_LABEL_SIZE / 2, "right");
   }
-  label(count(stats.firstMove), plotLeft, undoBottom + CHART_PAD_BOTTOM / 2 + 2, "left");
-  label(count(stats.lastMove), plotRight, undoBottom + CHART_PAD_BOTTOM / 2 + 2, "right");
+  label(count(stats.firstMove), plotLeft, plotBottom + CHART_PAD_BOTTOM / 2 + 2, "left");
+  label(count(stats.lastMove), plotRight, plotBottom + CHART_PAD_BOTTOM / 2 + 2, "right");
 
-  // Bars first, so a line that dips into the gap is drawn over them rather than under.
-  context.fillStyle = paintedColor("swatch undos");
+  /**
+   * A lane of bars, rounded at the end the data reaches and square where it meets its
+   * baseline -- which is what keeps a one-move bar from reading as a dot floating over
+   * the axis. A bin worth nothing draws nothing; a bin worth anything at all draws a
+   * mark, however thin the bin is.
+   */
   const barWidth = Math.max(CHART_MIN_MARK, binPixels - CHART_BAR_GAP);
-  for (const [index, bin] of stats.bins.entries()) {
-    if (bin.undos === 0) {
-      continue;
+  const bars = (lane, max, value) => {
+    for (const [index, bin] of stats.bins.entries()) {
+      const amount = value(bin);
+      if (amount === 0) {
+        continue;
+      }
+      const barHeight = Math.max(CHART_MIN_MARK, heightIn(lane, amount, max));
+      const radius = Math.min(CHART_BAR_RADIUS, barWidth / 2, barHeight / 2);
+      context.beginPath();
+      context.roundRect(
+        centre(index) - barWidth / 2, lane.bottom - barHeight, barWidth, barHeight,
+        [radius, radius, 0, 0]
+      );
+      context.fill();
     }
-    const barHeight = Math.max(CHART_MIN_MARK, (bin.undos / stats.maxUndos) * undoHeight);
-    const x = centre(index) - barWidth / 2;
-    context.beginPath();
-    // Rounded at the end the data reaches and square where it meets its baseline, which
-    // is what keeps a one-move bar from reading as a dot floating over the axis.
-    const radius = Math.min(CHART_BAR_RADIUS, barWidth / 2, barHeight / 2);
-    context.roundRect(x, undoBottom - barHeight, barWidth, barHeight, [radius, radius, 0, 0]);
-    context.fill();
-  }
+  };
+
+  // Bars first, so a line that dips into a gap is drawn over them rather than under.
+  context.fillStyle = paintedColor("swatch gained");
+  bars(lanes.gained, stats.maxGained, (bin) => bin.gained);
+  context.fillStyle = paintedColor("swatch undos");
+  bars(lanes.undos, stats.maxUndos, (bin) => bin.undos);
 
   context.strokeStyle = paintedColor("swatch points");
   context.fillStyle = context.strokeStyle;
