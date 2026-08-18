@@ -1,0 +1,15 @@
+  <!-- The bench's own strip, moved into the page header by bench.js. Nothing under site/
+       knows it exists: a bundle built without --bench is the demo and nothing else. -->
+  <div id="bench" hidden>
+    <p id="bench-label">Jump to a state</p>
+    <div id="bench-states"></div>
+    <p id="bench-note">Each one loads a real save into the live game — play on from it, undo it, scrub it, graph it. Hover the score line for the reading with nothing left out.</p>
+  </div>
+  <!-- Where the Share button's image is shown. An artifact frame grants a page no
+       download and no Web Share, so the file the demo would hand over has nowhere to go;
+       the image is worth looking at anyway, being drawn from the score line's own text. -->
+  <div id="bench-image" hidden>
+    <div id="bench-image-frame">
+      <button id="bench-image-close" type="button">Close</button>
+    </div>
+  </div>

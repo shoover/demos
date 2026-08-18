@@ -6,12 +6,16 @@ helpers alongside.
 - `site/`: the demos themselves, one directory each, plus a generated
   `index.html`
 - `scripts/generate-index.py`: regenerates `site/index.html`
+- `scripts/bundle-vanilla-2048.py`: folds that demo into one self-contained page
+  for publishing as an Artifact, with `--bench` adding the state-loading strip
+  in `scripts/bench/`
 - `tests/`: stdlib-only tests (Python `unittest`, Node's built-in runner);
   demo dependencies are loaded by the browser, not installed here
 
 # Development flow
 
-- Use `just` recipes: `generate-index`, `serve`, `test` (`test-py`, `test-js`).
+- Use `just` recipes: `generate-index`, `serve`, `bundle`, `bundle-bench`,
+  `test` (`test-py`, `test-js`).
 - Run `just test` before commit.
 - Commit: Conventional Commits (`feature|fix|refactor|test|ci|tools|docs`)
   scoped to the demo touched, e.g. `feature(2048-js): ...`. Omit the scope for
