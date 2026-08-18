@@ -590,6 +590,20 @@
     #chart-legend, #chart-readout { font-size: 11px; }
     #overlay { inset: 8px; max-width: calc(100% - 16px); padding: 8px 10px; border-radius: 8px; font-size: 12px; }
   </style>
+
+  <!-- One step further down, for the narrowest phones still in use. The score line is
+       the widest thing in the panel and it must not wrap, for the reason the header
+       gives: the board is sized from what two header lines leave over, so a third row is
+       a board that no longer fits. At 13px an end-game replayed board runs 300px against
+       the 290px a 320px screen leaves it; at 12px it runs 277px.
+
+       After the compact block rather than before it: both queries match a 320px screen
+       and they carry the same specificity, so this only wins by landing second. No id,
+       and nothing reads it back either -- unlike the breakpoint above, it changes type
+       and nothing the script has to measure against. -->
+  <style media="(max-width: 340px)">
+    #panel { font-size: 12px; }
+  </style>
 </head>
 <body>
   <header>
@@ -603,6 +617,12 @@
            run. All four fields shared one line until a six-figure best with a replayed
            one in brackets beside it pushed the move count onto a second by itself.
 
+           Every score on both lines carries the largest tile it was reached on, after a
+           middot, and the fields are divided by the same single-spaced bar the readings
+           line under the board uses. The pair is what makes this the widest line in the
+           panel: an end-game replayed board runs 300px of the 330px a 360px phone leaves
+           it, against 259px before the tiles were on it at all.
+
            Two lines on purpose rather than one that sometimes wraps. The board is sized
            from whatever the rest of the panel leaves over, measured at startup and again
            when the play area resizes -- and a line growing a second row is neither of
@@ -613,8 +633,8 @@
            scrubbing swaps "Moves: 4" for "Move 4/12" and back on every drag, and with
            nothing to its right there is nothing for that to shove around. The clock that
            walks back through those moves stays below, with the rest of the controls. -->
-      <p id="score-line">Score: 0  |  Best: 0</p>
-      <p id="progress-line"><span id="play-time">Time: 0:00</span>  |  <span id="timeline-label">Moves: 0</span></p>
+      <p id="score-line">Score: 0·0 | Best: 0·0</p>
+      <p id="progress-line"><span id="play-time">Time: 0:00</span> | <span id="timeline-label">Moves: 0</span></p>
       <!-- The game's own controls, and after them the clock that opens the ones for
            going back through it. -->
       <div id="actions">

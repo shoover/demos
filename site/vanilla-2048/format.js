@@ -53,3 +53,70 @@ export const formatDuration = (totalSeconds) => {
     ? `${hours}:${pad2(minutes)}:${pad2(seconds)}`
     : `${minutes}:${pad2(seconds)}`;
 };
+
+/**
+ * The score line, whole: what the state on screen is worth and the largest tile it got
+ * there with, then the same pair for the best game there has been.
+ *
+ * Two figures joined by a middot rather than two labelled fields, because a third label
+ * is what the line has no room for -- "Score:" and "Best:" already share it with the
+ * replayed track's bracket, and a fourth field is what pushed the move count onto a line
+ * of its own in the first place. The middot rather than a slash: the line directly below
+ * this one writes "Move 128/512", where the slash means "of", and the tile is not a
+ * fraction of anything.
+ *
+ * The tile is printed in full while the score beside it is abbreviated. They are the
+ * same kind of number only in the sense that both are integers: a tile is one of a dozen
+ * names a player knows by sight, and "2k" is not what anyone calls the 2048 tile in the
+ * game named after it. It also costs nothing to print whole -- four digits at the very
+ * most, against the eight a score can run to.
+ *
+ * Every score on the line carries its tile, the replayed track's included: the bracket
+ * holds a game, and a game is a pair here. Leaving it a bare score would have made the
+ * one figure on the line that means something different from the figure beside it.
+ *
+ * The fields are divided by a single-spaced bar, which is what the readings line under
+ * the board has always used. The pair costs the line width and this is where it comes
+ * back from, but the two lines agreeing on their divider is worth having on its own --
+ * the wide bar was only ever the header's own habit.
+ */
+export const scoreLine = ({
+  score,
+  topTile,
+  replayed,
+  best,
+  bestTile,
+  replayedBest,
+  replayedBestTile,
+}) =>
+  `Score: ${abbreviate(score)}\u00b7${topTile}${replayed ? "*" : ""} | ` +
+  `Best: ${abbreviate(best)}\u00b7${bestTile}` +
+  (replayedBest > 0
+    ? ` (${abbreviate(replayedBest)}\u00b7${replayedBestTile}*)`
+    : "");
+
+/**
+ * The same reading with nothing left out, for the line's hover title: exact digits, the
+ * tiles named in words rather than by position, and the one thing the line has no room
+ * to say at all -- the move a replayed game was played on from.
+ */
+export const scoreTitle = ({
+  score,
+  topTile,
+  replayed,
+  replayedFrom,
+  best,
+  bestTile,
+  replayedBest,
+  replayedBestTile,
+}) => {
+  const played = replayed ? `, played on from move ${count(replayedFrom)}` : "";
+  const replayedTrack =
+    replayedBest > 0
+      ? ` | Replayed best: ${count(replayedBest)} (top tile ${replayedBestTile})`
+      : "";
+  return (
+    `Score: ${count(score)} (top tile ${topTile}${played}) | ` +
+    `Best: ${count(best)} (top tile ${bestTile})${replayedTrack}`
+  );
+};

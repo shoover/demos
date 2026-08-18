@@ -4,7 +4,7 @@
  */
 
 import { SIZE, Game, SaveError, decodeSavedState } from "./board.js";
-import { abbreviate, count, formatDuration } from "./format.js";
+import { abbreviate, count, formatDuration, scoreLine, scoreTitle } from "./format.js";
 import { binGame } from "./stats.js";
 
 const BEST_SCORE_KEY = "vanilla-2048.bestScore";
@@ -13,6 +13,11 @@ const BEST_SCORE_KEY = "vanilla-2048.bestScore";
 // that one keep the meaning they were written with: every one of them was reached before
 // a game could rewrite its own history, which is exactly what the clean track holds.
 const BEST_REPLAYED_SCORE_KEY = "vanilla-2048.bestReplayedScore";
+// The largest tile ever landed, split across the same two tracks as the scores above and
+// stored the same way: a key each, beside the game rather than inside it, so a saved
+// board is bounded by figures that outlive it.
+const BEST_TILE_KEY = "vanilla-2048.bestTile";
+const BEST_REPLAYED_TILE_KEY = "vanilla-2048.bestReplayedTile";
 const GAME_STATE_KEY = "vanilla-2048.gameState.v1";
 
 const SLIDE_MS = 100;
@@ -138,27 +143,36 @@ const storage = (() => {
   }
 })();
 
-function loadBestScore(key) {
+/** One stored figure -- a best score or a best tile -- read back as a number. */
+function loadBest(key, name) {
   const value = storage.getItem(key);
   if (value === null) {
     return 0;
   }
   if (!/^\d+$/.test(value) || !Number.isSafeInteger(Number(value))) {
-    throw new SaveError(`Invalid stored 2048 best score: ${value}`);
+    throw new SaveError(`Invalid stored 2048 ${name}: ${value}`);
   }
   return Number(value);
 }
 
 /**
- * Write down the best score the game has just raised.
+ * Write down the best figures the game has just raised.
  *
- * Which of the two that is, the game knows and this does not have to: a game scores into
- * one track or the other, never both, so there is only ever one key to write.
+ * Which track they belong to, the game knows and this does not have to: a game plays
+ * into one or the other, never both, so it is always that track's pair of keys.
+ *
+ * Both are written whichever of the two moved. They move independently -- a merge into a
+ * new largest tile is rarely the move that takes the points lead -- and writing the pair
+ * costs one more localStorage set than carrying which one it was down to here.
  */
-function saveBestScore() {
+function saveBests() {
   storage.setItem(
     game.replayed ? BEST_REPLAYED_SCORE_KEY : BEST_SCORE_KEY,
     String(game.ownBest)
+  );
+  storage.setItem(
+    game.replayed ? BEST_REPLAYED_TILE_KEY : BEST_TILE_KEY,
+    String(game.ownBestTile)
   );
 }
 
@@ -472,31 +486,29 @@ function paintSliding(slidingTiles) {
 }
 
 /**
- * What the state on screen is worth, and what has ever been reached.
+ * What the state on screen is worth and how far it got, and what has ever been reached.
  *
  * The whole of its line: the clock and the move count have their own below, which is
- * what leaves this one room for a best score carrying a replayed one beside it.
+ * what leaves this one room for a best carrying a replayed one beside it.
  *
  * An asterisk is the whole of what marks a game that has been played on from an earlier
  * state, and there is deliberately no counterpart on a clean one: a score with nothing
  * beside it is a score, which is what it was before any of this existed. The best line
  * carries the replayed track in brackets after the clean one, and carries it only once
  * there is one -- a player who has never taken a move back never sees a bracket.
+ *
+ * Both readings are built in format.js, out of numbers and nothing else: what the line
+ * says is a question about wording and width, which is worth being able to test without
+ * a page. The game is handed over whole because its own property names are the ones the
+ * two formatters ask for.
  */
 function paintScore() {
-  const best =
-    game.replayedBest > 0
-      ? `${abbreviate(game.best)} (${abbreviate(game.replayedBest)}*)`
-      : abbreviate(game.best);
-  elements.scoreLine.textContent =
-    `Score: ${abbreviate(game.score)}${game.replayed ? "*" : ""}  |  Best: ${best}`;
-  // The line trades exact digits for width, so the exact score is put back on hover.
-  // What the asterisk is short for rides along beside it: the move it names is the one
-  // thing the mark itself cannot say, and the line has no room to say it either.
-  const replayedNote = game.replayed
-    ? ` (played on from move ${count(game.replayedFrom)})`
-    : "";
-  elements.scoreLine.title = `Score: ${count(game.score)}${replayedNote}  |  Best: ${count(game.best)}`;
+  elements.scoreLine.textContent = scoreLine(game);
+  // The line trades exact digits for width -- and, on the replayed track, a tile for it
+  // -- so the reading with nothing left out is put back on hover. What the asterisk is
+  // short for rides along in it: the move it names is the one thing the mark itself
+  // cannot say, and the line has no room to say it either.
+  elements.scoreLine.title = scoreTitle(game);
 }
 
 // Refused while the past is on screen, since a move can only be made from the latest
@@ -1146,7 +1158,7 @@ function landSlide() {
 
 /**
  * Write down what a change to the live game leaves behind: the clock's reading, the best
- * score if it moved, and the game itself.
+ * figures if either moved, and the game itself.
  *
  * The clock is read before it is set, so the seconds stored are the ones the change
  * happened at rather than a fresh zero, and whether it keeps running is asked of the
@@ -1157,7 +1169,7 @@ function commitChange(bestChanged = false) {
   const playSeconds = playTime.elapsed();
   playTime.set(playSeconds, clockRuns());
   if (bestChanged) {
-    saveBestScore();
+    saveBests();
   }
   saver.save(game, playSeconds);
 }
@@ -1227,7 +1239,8 @@ function playFrom(index, describe) {
   }
   repaint(game.arrival, describe(discarded));
   // Always, rather than on a reported change: the fork is what carried the clean best
-  // across to the replayed track, and that is a write whether or not it moved a number.
+  // score and tile across to the replayed track, and that is a write whether or not it
+  // moved either number.
   commitChange(true);
 }
 
@@ -1257,7 +1270,7 @@ function applyMove(direction) {
   );
 
   paintPanel();
-  commitChange(result.bestChanged);
+  commitChange(result.bestChanged || result.bestTileChanged);
 }
 
 /* Input -------------------------------------------------------------------- */
@@ -1725,7 +1738,8 @@ function reportCorruptState(reason) {
   const detail = document.createElement("small");
   detail.textContent = reason;
   const consequence = document.createElement("small");
-  consequence.textContent = "Starting fresh discards the saved game and the best scores.";
+  consequence.textContent =
+    "Starting fresh discards the saved game, the best scores and the best tiles.";
   const button = document.createElement("button");
   button.type = "button";
   button.textContent = "Start fresh";
@@ -1736,6 +1750,8 @@ function reportCorruptState(reason) {
     storage.removeItem(GAME_STATE_KEY);
     storage.removeItem(BEST_SCORE_KEY);
     storage.removeItem(BEST_REPLAYED_SCORE_KEY);
+    storage.removeItem(BEST_TILE_KEY);
+    storage.removeItem(BEST_REPLAYED_TILE_KEY);
     location.reload();
   });
 
@@ -1754,24 +1770,34 @@ function reportCorruptState(reason) {
 
 /* Startup ------------------------------------------------------------------ */
 
-// Replaced by start() with the game that carries the stored best score. The empty
-// stand-in is what the frame loop reads if the stored best score is itself rejected.
+// Replaced by start() with the game that carries the stored best figures. The empty
+// stand-in is what the frame loop reads if one of those figures is itself rejected.
 let game = new Game();
 
 function restoreGame() {
   game = new Game({
-    best: loadBestScore(BEST_SCORE_KEY),
-    replayedBest: loadBestScore(BEST_REPLAYED_SCORE_KEY),
+    best: loadBest(BEST_SCORE_KEY, "best score"),
+    replayedBest: loadBest(BEST_REPLAYED_SCORE_KEY, "replayed best score"),
+    bestTile: loadBest(BEST_TILE_KEY, "best tile"),
+    replayedBestTile: loadBest(BEST_REPLAYED_TILE_KEY, "replayed best tile"),
   });
   const serialized = storage.getItem(GAME_STATE_KEY);
   if (serialized === null) {
     return false;
   }
+  // Only the scores bound the save. The tiles are read back off the boards it carries,
+  // which is why they are not passed in: see Game.restore.
   const saved = decodeSavedState(serialized, {
     best: game.best,
     replayedBest: game.replayedBest,
   });
   game.restore(saved);
+  // The restore can raise a best tile -- off a save written before tiles were tracked at
+  // all, whose stored figure is a zero the boards disprove -- and the next thing the
+  // player does may be to start a new game, which discards the only board that proved
+  // it. So it is written down here rather than left to the first move that raises
+  // something.
+  saveBests();
   playTime.set(saved.playSeconds, clockRuns());
   return true;
 }

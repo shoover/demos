@@ -9,7 +9,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { abbreviate, count, formatDuration } from "../site/vanilla-2048/format.js";
+import {
+  abbreviate,
+  count,
+  formatDuration,
+  scoreLine,
+  scoreTitle,
+} from "../site/vanilla-2048/format.js";
 
 test("count groups digits with commas", () => {
   assert.equal(count(0), "0");
@@ -62,3 +68,87 @@ for (const [seconds, expected] of [
     assert.equal(formatDuration(seconds), expected);
   });
 }
+
+/* The score line ------------------------------------------------------------ */
+
+/** A game as the two formatters read it: every figure they name, and nothing else. */
+const reading = (overrides = {}) => ({
+  score: 3128,
+  topTile: 256,
+  replayed: false,
+  replayedFrom: null,
+  best: 12040,
+  bestTile: 1024,
+  replayedBest: 0,
+  replayedBestTile: 0,
+  ...overrides,
+});
+
+test("the score line pairs each score with the tile it was reached on", () => {
+  assert.equal(scoreLine(reading()), "Score: 3.1k\u00b7256 | Best: 12k\u00b71024");
+});
+
+test("the score line prints tiles whole while abbreviating the scores beside them", () => {
+  // 2048 is the name of the game, not "2k", and a tile is four digits at the very most.
+  assert.equal(
+    scoreLine(reading({ score: 205000, topTile: 2048, best: 205000, bestTile: 2048 })),
+    "Score: 205k\u00b72048 | Best: 205k\u00b72048"
+  );
+});
+
+test("a replayed game is marked once, after the pair it belongs to", () => {
+  assert.equal(
+    scoreLine(reading({ replayed: true, replayedFrom: 84, replayedBest: 9000, replayedBestTile: 512 })),
+    "Score: 3.1k\u00b7256* | Best: 12k\u00b71024 (9k\u00b7512*)"
+  );
+});
+
+test("the replayed track is a pair like every other figure on the line", () => {
+  // The bracket holds a game, and a game is a score and the tile it got there on. A bare
+  // score in it would be the one figure on the line meaning something other than what
+  // the figure beside it means.
+  const line = scoreLine(
+    reading({ replayed: true, replayedFrom: 84, replayedBest: 9000, replayedBestTile: 512 })
+  );
+  assert.equal(line.match(/\u00b7/g).length, 3);
+});
+
+test("a player who has never taken a move back sees no bracket", () => {
+  assert.ok(!scoreLine(reading()).includes("("));
+});
+
+test("the score line stays inside the width a phone gives it", () => {
+  // The line must never wrap: the board is sized from what a two-line header leaves
+  // over, so a third row is a board that no longer fits. The worst case a save can hold
+  // is every figure at its longest, and it measured 300px of the 330px a 360px phone
+  // leaves for text -- 48 characters in the panel's face, which is what is checked here.
+  // A 320px screen leaves 290px, which is what the second type step in the stylesheet
+  // is for; this bound is the 360px one.
+  const worst = scoreLine(
+    reading({
+      score: 99999999,
+      topTile: 8192,
+      replayed: true,
+      best: 99999999,
+      bestTile: 8192,
+      replayedBest: 99999999,
+      replayedBestTile: 8192,
+    })
+  );
+  assert.ok(worst.length <= 50, `${worst.length} chars: ${worst}`);
+});
+
+test("the hover title spells out everything the line abbreviates", () => {
+  assert.equal(
+    scoreTitle(reading({ replayed: true, replayedFrom: 84, replayedBest: 9000, replayedBestTile: 512 })),
+    "Score: 3,128 (top tile 256, played on from move 84) | " +
+      "Best: 12,040 (top tile 1024) | Replayed best: 9,000 (top tile 512)"
+  );
+});
+
+test("the hover title names no replayed track until there is one", () => {
+  assert.equal(
+    scoreTitle(reading()),
+    "Score: 3,128 (top tile 256) | Best: 12,040 (top tile 1024)"
+  );
+});
