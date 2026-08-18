@@ -39,12 +39,13 @@ const bestsOf = (game) => ({ best: game.best, replayedBest: game.replayedBest })
 const fixedRandom = () => 0;
 
 /** A Game with deterministic spawns, optionally starting from a fixed board. */
-function newGame(cells = null, best = HUGE_BEST) {
+function newGame(cells = null, best = HUGE_BEST, bestTile = 0) {
   // 0 picks the first empty cell but would also roll a 4, so the value roll is
   // answered separately: cell choice first, then the spawn value.
   let call = 0;
   const game = new Game({
     best,
+    bestTile,
     random: () => (call++ % 2 === 0 ? 0 : 0.99),
   });
   if (cells !== null) {
@@ -637,7 +638,7 @@ test("tallies outlive the states they were counted against", () => {
   assert.equal(game.history[1].undos, 2, "and still carries the count");
 });
 
-/* Best scores ----------------------------------------------------------------- */
+/* Best scores and tiles -------------------------------------------------------- */
 
 test("a clean game scores into the clean best", () => {
   const game = newGame(null, 0);
@@ -682,6 +683,104 @@ test("neither best score falls when history is discarded", () => {
   assert.ok(game.score < best);
   assert.equal(game.best, best);
   assert.ok(game.replayedBest >= replayedBest);
+});
+
+test("the largest tile is the one on the state being looked at", () => {
+  const game = newGame([
+    [2, 2, 0, 0],
+    [0, 0, 0, 0],
+    [0, 0, 0, 0],
+    [0, 0, 0, 0],
+  ]);
+  assert.equal(game.topTile, 2);
+  game.move("left");
+  assert.equal(game.topTile, 4);
+
+  // Scrubbing back reads the board it lands on, the same way the score does: what move 0
+  // had reached, not what the game went on to.
+  game.seek(0);
+  assert.equal(game.topTile, 2);
+});
+
+test("a new largest tile raises the best tile and reports the change", () => {
+  const game = newGame([
+    [2, 2, 0, 0],
+    [0, 0, 0, 0],
+    [0, 0, 0, 0],
+    [0, 0, 0, 0],
+  ]);
+  assert.equal(game.bestTile, 0);
+  assert.equal(game.move("left").bestTileChanged, true);
+  assert.equal(game.bestTile, 4);
+
+  // A game whose best tile is already past anything on this board raises nothing, however
+  // the points go: the two figures are reported apart because they move apart.
+  const behind = newGame(
+    [
+      [2, 2, 0, 0],
+      [0, 0, 0, 0],
+      [0, 0, 0, 0],
+      [0, 0, 0, 0],
+    ],
+    0,
+    1024
+  );
+  const result = behind.move("left");
+  assert.equal(result.bestTileChanged, false);
+  assert.equal(result.bestChanged, true);
+  assert.equal(behind.bestTile, 1024);
+});
+
+test("the best tile reached before a fork carries across to the replayed track", () => {
+  const game = replayable();
+  const reached = game.bestTile;
+  assert.ok(reached > 0);
+
+  game.playFrom(2);
+  // Landed before anything was rewritten, so taking a move back does not cost it.
+  assert.equal(game.replayedBestTile, reached);
+  assert.equal(game.bestTile, reached);
+});
+
+test("a replayed game raises the replayed best tile and leaves the clean one alone", () => {
+  const game = replayable();
+  const clean = game.bestTile;
+  game.playFrom(2);
+  while (!game.gameOver && game.moves < 60) {
+    for (const direction of ["left", "down", "right", "up"]) {
+      game.move(direction);
+    }
+  }
+
+  assert.equal(game.bestTile, clean);
+  assert.ok(game.replayedBestTile >= game.topTile);
+  assert.ok(game.replayedBestTile > clean);
+});
+
+test("a stored best tile that no board could hold is rejected", () => {
+  // A count can be any number; a tile cannot. 5 is corruption, not a low figure.
+  assert.throws(() => new Game({ bestTile: 5 }), SaveError);
+  assert.throws(() => new Game({ replayedBestTile: -2 }), SaveError);
+  // Zero is what a track no game has landed a tile on reads.
+  assert.equal(new Game({ bestTile: 0 }).bestTile, 0);
+});
+
+test("a restored save raises its track's best tile off the boards it carries", () => {
+  const played = newGame([
+    [8, 8, 0, 0],
+    [0, 0, 0, 0],
+    [0, 0, 0, 0],
+    [0, 0, 0, 0],
+  ]);
+  played.move("left");
+  assert.equal(played.bestTile, 16);
+
+  // A save written before tiles were tracked at all: the keys beside it read zero, and
+  // the boards it carries say otherwise. The boards win -- that tile was really landed.
+  const restored = newGame();
+  restored.restore(decodeSavedState(played.encode(1), bestsOf(played)));
+  assert.equal(restored.bestTile, 16);
+  assert.equal(restored.replayedBestTile, 0);
 });
 
 /* Saving -------------------------------------------------------------------- */

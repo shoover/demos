@@ -57,6 +57,18 @@ function requireNonNegativeInt(value, name) {
   return value;
 }
 
+// A stored tile, which is a power of two -- or zero, for a track no game has landed a
+// tile on yet. Checked rather than merely bounded, because a tile is not a count: 5 is
+// a number no board can hold, and a stored one is corruption rather than a low figure.
+function requireTile(value, name) {
+  if (!isValidTile(value)) {
+    throw new SaveError(`Invalid saved 2048 ${name}: ${JSON.stringify(value)}`);
+  }
+  return value;
+}
+
+const topTileOf = (cells) => Math.max(...cells.map((row) => Math.max(...row)));
+
 function validateSavedBoard(value) {
   if (
     !Array.isArray(value) ||
@@ -478,10 +490,23 @@ export function decodeSavedState(serialized, { best, replayedBest }) {
  * at the newest one by discarding what came after it.
  */
 export class Game {
-  constructor({ best = 0, replayedBest = 0, random = Math.random } = {}) {
+  constructor({
+    best = 0,
+    replayedBest = 0,
+    bestTile = 0,
+    replayedBestTile = 0,
+    random = Math.random,
+  } = {}) {
     this.random = random;
     this.best = requireNonNegativeInt(best, "best score");
     this.replayedBest = requireNonNegativeInt(replayedBest, "replayed best score");
+    // The largest tile ever landed, split across the same two tracks as the score and
+    // for the same reason: a 2048 reached by rerolling an unlucky spawn is not the one a
+    // straight playthrough reached. A tile is not a second reading of the score either
+    // -- the two peak in different games, since points keep accruing after the board has
+    // stopped doubling -- so each track carries its own, raised on its own.
+    this.bestTile = requireTile(bestTile, "best tile");
+    this.replayedBestTile = requireTile(replayedBestTile, "replayed best tile");
     // The move count play was last resumed at, or null for a game played straight
     // through. A move count rather than a timeline position, because positions shift
     // when the oldest states are trimmed and this has to still name the same move --
@@ -498,6 +523,17 @@ export class Game {
     // the points line starts from.
     this.history = [historyEntry(0, 0)];
     this.cursor = 0;
+  }
+
+  /**
+   * The largest tile on the board as it now stands.
+   *
+   * Read off the cells rather than tallied as moves land, so it follows the state on
+   * screen the way the score does: scrubbing back to move 20 shows the tile move 20 had
+   * reached, not the one the game went on to make.
+   */
+  get topTile() {
+    return topTileOf(this.cells);
   }
 
   /** Whether the state on screen is the newest one -- the only one that can be played. */
@@ -523,12 +559,25 @@ export class Game {
     return this.replayed ? this.replayedBest : this.best;
   }
 
+  /** The best tile this game is measured against, on the track ownBest names. */
+  get ownBestTile() {
+    return this.replayed ? this.replayedBestTile : this.bestTile;
+  }
+
   /** Raise this game's own track. Which one that is, only the game knows. */
   setOwnBest(score) {
     if (this.replayed) {
       this.replayedBest = score;
     } else {
       this.best = score;
+    }
+  }
+
+  setOwnBestTile(tile) {
+    if (this.replayed) {
+      this.replayedBestTile = tile;
+    } else {
+      this.bestTile = tile;
     }
   }
 
@@ -687,6 +736,9 @@ export class Game {
     // above every score in the timeline at the moment of the fork, which is what lets
     // the whole of a replayed save be measured against that one track.
     this.replayedBest = Math.max(this.replayedBest, this.best);
+    // The tile track forks the same way and for the same reason: the tile was really
+    // landed before anything was rewritten, so going back must not cost it either.
+    this.replayedBestTile = Math.max(this.replayedBestTile, this.bestTile);
     this.replayedFrom = this.moves;
     return discarded;
   }
@@ -751,9 +803,21 @@ export class Game {
     }
     this.moves += 1;
     const spawnedCell = this.spawnTile();
+    // Read after the spawn, so what is claimed is the board as it stands rather than as
+    // the merge left it: the tile just dealt is on it, and in the opening moves that
+    // tile is sometimes the largest one there.
+    //
+    // Reported separately from the score's own change because the two move apart: a
+    // merge that makes a new largest tile is not usually the move that takes the lead on
+    // points, and a game can raise one track's figure for thousands of moves without
+    // touching the other.
+    const bestTileChanged = this.topTile > this.ownBestTile;
+    if (bestTileChanged) {
+      this.setOwnBestTile(this.topTile);
+    }
     this.gameOver = !boardCanMove(this.cells);
     this.record(direction);
-    return { mergedCells, slidingTiles, spawnedCell, gained, bestChanged };
+    return { mergedCells, slidingTiles, spawnedCell, gained, bestChanged, bestTileChanged };
   }
 
   restore(saved) {
@@ -763,6 +827,13 @@ export class Game {
     );
     this.replayedFrom = saved.replayedFrom ?? null;
     this.seek(saved.cursor);
+    // The boards are their own proof. Whatever the largest tile on this save is, it was
+    // really landed, into the track the save says it was played on -- so that track's
+    // best tile is at least that high however the stored figure reads, and there is
+    // nothing to check the two against each other for. It is also what opens a game
+    // saved before any of this existed with its best tile already right, rather than at
+    // zero until the next merge happens to raise it.
+    this.setOwnBestTile(Math.max(this.ownBestTile, topTileOf(this.latest.cells)));
   }
 
   /** Serialize for storage. Play time is measured outside, so it is passed in. */
