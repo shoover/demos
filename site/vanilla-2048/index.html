@@ -307,9 +307,10 @@
       stroke-linejoin: round;
     }
 
-    /* Both popups open downward from the button that owns them, over the help line --
+    /* The popups open downward from the button that owns them, over the help line --
        which puts them just clear of the board, the one thing scrubbing is for looking at.
        They share an anchor and are never open together, so they share their chrome. */
+    #new-game-confirm,
     #timeline,
     #stats-panel {
       position: absolute;
@@ -336,6 +337,24 @@
       align-items: center;
     }
 
+    /* The question and its two answers on one row, laid out like the history's. Nothing
+       else is in it: what is about to be discarded is the board behind, and this is
+       short enough to leave it in view.
+
+       As wide as those three things and no wider, unlike the other two popups, which
+       have a slider and a graph to fill the panel with. It still starts at the panel's
+       left edge, under the button that asks, and gives the width back on a screen too
+       narrow to hold the row -- where it wraps rather than pushing the panel out. */
+    #new-game-confirm {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+      right: auto;
+      max-width: 100%;
+    }
+
+    #new-game-confirm[hidden],
     #timeline[hidden],
     #stats-panel[hidden] { display: none; }
 
@@ -639,6 +658,23 @@
            going back through it. -->
       <div id="actions">
         <button id="new-game" type="button">New Game</button>
+        <!-- What New Game costs, asked before it is paid. Only a game with moves on it
+             is worth asking about, so this is the same button either way: see
+             requestNewGame for which press opens the question and which just answers it.
+
+             A row in the panel rather than a modal over the page: the board it is about
+             is dimmed behind it, the way it is under either other popup, and either
+             answer is one press away -- Discard, Resume, Escape, or, since a question
+             left standing is a question declined, a press anywhere else.
+
+             The two answers say what they do to the game rather than to the question:
+             play is stopped for as long as this is up, so the one that keeps the game is
+             the one that starts it running again. -->
+        <div id="new-game-confirm" role="dialog" aria-labelledby="new-game-question" hidden>
+          <p id="new-game-question">Discard this game?</p>
+          <button id="confirm-new-game" type="button">Discard</button>
+          <button id="resume-game" type="button">Resume</button>
+        </div>
         <!-- The last move, taken back. Up here rather than in the popup because taking
              one move back is part of playing, while walking the history is not; what it
              does under the covers is the popup's own truncation, one state along.

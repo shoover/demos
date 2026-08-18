@@ -79,6 +79,9 @@ const elements = {
   tiles: document.getElementById("tiles"),
   overlay: document.getElementById("overlay"),
   nextMove: document.getElementById("next-move"),
+  newGame: document.getElementById("new-game"),
+  newGameConfirm: document.getElementById("new-game-confirm"),
+  confirmNewGame: document.getElementById("confirm-new-game"),
   undo: document.getElementById("undo"),
   timeTravel: document.getElementById("time-travel"),
   timeline: document.getElementById("timeline"),
@@ -99,16 +102,22 @@ const compactMedia = window.matchMedia(
 );
 
 /**
- * Whether either popup is up, which is the same question as whether play is stopped.
+ * Whether a popup is up, which is the same question as whether play is stopped.
  *
- * A popup is opened to read something -- where the game has been, or how it got there --
- * and both of them cover the board they are about. Playing on underneath is a move made
- * against a board that cannot be seen, so the game waits: the clock stops, the d-pad goes
- * flat, and the board is drawn back the same way it is when the past is on screen.
- * Nothing here refuses the history controls, which are what the popups are for.
+ * Two of them are opened to read something -- where the game has been, or how it got
+ * there -- and the third asks whether the game may be thrown away. All three cover the
+ * board they are about. Playing on underneath is a move made against a board that cannot
+ * be seen, or a move added to a game being asked about, so the game waits: the clock
+ * stops, the d-pad goes flat, and the board is drawn back the same way it is when the
+ * past is on screen. Nothing here refuses the history controls, which are what the
+ * popups are for.
  */
 function popupOpen() {
-  return !elements.timeline.hidden || !elements.statsPanel.hidden;
+  return (
+    !elements.timeline.hidden ||
+    !elements.statsPanel.hidden ||
+    !elements.newGameConfirm.hidden
+  );
 }
 
 function setStatus(text, clearAfterMs) {
@@ -1174,12 +1183,52 @@ function commitChange(bestChanged = false) {
   saver.save(game, playSeconds);
 }
 
+/**
+ * Show or hide the question New Game asks.
+ *
+ * Opening hands focus to the answer that was asked for: the press that opened this was a
+ * press for a new game, and the one that lands on the focused button confirms it. Closing
+ * hands focus back to the button that asked, but only if it was still inside -- a press
+ * elsewhere on the page has already put focus where that press meant it to go.
+ */
+function setConfirmOpen(open) {
+  elements.newGameConfirm.hidden = !open;
+  if (open) {
+    elements.confirmNewGame.focus();
+  } else if (elements.newGameConfirm.contains(document.activeElement)) {
+    elements.newGame.focus();
+  }
+  syncPlayState();
+}
+
+/**
+ * New Game, pressed. Ask first if there is a game to lose.
+ *
+ * Only a game that has been played is worth a question. A board still on its opening two
+ * tiles has nothing to discard, and a finished one has nothing left to play -- the
+ * game-over line asks for this very press, so a question in front of it would charge two
+ * presses for the only thing left to do.
+ *
+ * Pressed again while the question is up, it puts the question away, exactly as the clock
+ * and the graph close the popups they open. The answer is in the popup, where what it
+ * costs is written down.
+ */
+function requestNewGame() {
+  if (game.latest.moves === 0 || game.latest.gameOver) {
+    startNewGame();
+    return;
+  }
+  setConfirmOpen(elements.newGameConfirm.hidden);
+}
+
 function startNewGame() {
   const spawned = game.reset();
   slide = null;
   lastMoveAt = -Infinity;
   // Every control in it is about to be disabled: a new game has nowhere to scrub to.
   setTimelineOpen(false);
+  // Answered, whether or not it was ever asked: startup begins a game without one.
+  setConfirmOpen(false);
   // Just the news: the line it is standing in already says how to play, and saying it
   // again in fewer words would be the one thing this message costs.
   repaint({ appeared: new Set(spawned) }, "New game.");
@@ -1378,6 +1427,12 @@ window.addEventListener("keydown", (event) => {
     elements.graph.focus();
     return;
   }
+  // No answer is the answer: the game on the board is the one that keeps playing.
+  if (event.key === "Escape" && !elements.newGameConfirm.hidden) {
+    event.preventDefault();
+    setConfirmOpen(false);
+    return;
+  }
   const action = KEYS.get(event.key.toLowerCase());
   if (!action) {
     return;
@@ -1399,7 +1454,7 @@ window.addEventListener("keydown", (event) => {
     return;
   }
   if (action === "restart") {
-    startNewGame();
+    requestNewGame();
   } else {
     applyMove(action);
   }
@@ -1544,9 +1599,24 @@ document.addEventListener("pointerdown", (event) => {
     setStatsOpen(false);
     dismissed = true;
   }
+  // The question goes the same way, and this is also what keeps it from ever being up
+  // beside either other popup: opening one is a press outside the other. Not a press on
+  // New Game itself, which is a second press for a new game and closes the question by
+  // itself -- dismissing it here would leave that press with nothing left to do.
+  if (
+    !elements.newGameConfirm.hidden &&
+    target?.closest("#new-game-confirm, #new-game") === null
+  ) {
+    setConfirmOpen(false);
+    dismissed = true;
+  }
   dismissingPress = dismissed;
 });
-document.getElementById("new-game").addEventListener("click", startNewGame);
+elements.newGame.addEventListener("click", requestNewGame);
+elements.confirmNewGame.addEventListener("click", startNewGame);
+document
+  .getElementById("resume-game")
+  .addEventListener("click", () => setConfirmOpen(false));
 document.getElementById("share").addEventListener("click", () => {
   share().catch((error) => {
     if (error && error.name === "AbortError") {
