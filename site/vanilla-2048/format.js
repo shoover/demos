@@ -87,6 +87,22 @@ export const formatDuration = (totalSeconds) => {
  * back from, but the two lines agreeing on their divider is worth having on its own --
  * the wide bar was only ever the header's own habit.
  */
+// A tile that was never recorded reads as a dash rather than as a zero. A zero is a
+// measurement and this is the absence of one: a best score stored before tiles were
+// tracked at all is a real score with nothing on disk to say which tile reached it, and
+// nothing here guesses one. It heals the moment that track lands a tile of its own.
+//
+// An en dash rather than an em: it is exactly a digit wide in this face, so with the
+// line's tabular figures it stands in the slot the missing number would have stood in,
+// and it stays a mark of its own beside the middot instead of running into it.
+const UNRECORDED = "\u2013";
+const tile = (value) => (value === 0 ? UNRECORDED : String(value));
+
+// The same absence in prose, for the hover title, where a dash would read as a stray
+// mark rather than as a figure that is missing.
+const tileNote = (value) =>
+  value === 0 ? "no tile on record" : `top tile ${value}`;
+
 export const scoreLine = ({
   score,
   topTile,
@@ -96,10 +112,10 @@ export const scoreLine = ({
   replayedBest,
   replayedBestTile,
 }) =>
-  `Score: ${abbreviate(score)}\u00b7${topTile}${replayed ? "*" : ""} | ` +
-  `Best: ${abbreviate(best)}\u00b7${bestTile}` +
+  `Score: ${abbreviate(score)}\u00b7${tile(topTile)}${replayed ? "*" : ""} | ` +
+  `Best: ${abbreviate(best)}\u00b7${tile(bestTile)}` +
   (replayedBest > 0
-    ? ` (${abbreviate(replayedBest)}\u00b7${replayedBestTile}*)`
+    ? ` (${abbreviate(replayedBest)}\u00b7${tile(replayedBestTile)}*)`
     : "");
 
 /**
@@ -120,10 +136,10 @@ export const scoreTitle = ({
   const played = replayed ? `, played on from move ${count(replayedFrom)}` : "";
   const replayedTrack =
     replayedBest > 0
-      ? ` | Replayed best: ${count(replayedBest)} (top tile ${replayedBestTile})`
+      ? ` | Replayed best: ${count(replayedBest)} (${tileNote(replayedBestTile)})`
       : "";
   return (
-    `Score: ${count(score)} (top tile ${topTile}${played}) | ` +
-    `Best: ${count(best)} (top tile ${bestTile})${replayedTrack}`
+    `Score: ${count(score)} (${tileNote(topTile)}${played}) | ` +
+    `Best: ${count(best)} (${tileNote(bestTile)})${replayedTrack}`
   );
 };

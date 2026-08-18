@@ -118,6 +118,22 @@ test("the replayed track is a pair like every other figure on the line", () => {
   assert.equal(line.match(/\u00b7/g).length, 3);
 });
 
+test("a tile that was never recorded is a dash, not a zero", () => {
+  // What a best score stored before tiles were tracked comes back as: the score is real,
+  // and nothing on disk says which tile reached it. A zero would read as a measurement.
+  assert.equal(
+    scoreLine(reading({ best: 80800, bestTile: 0 })),
+    "Score: 3.1k\u00b7256 | Best: 80.8k\u00b7\u2013"
+  );
+});
+
+test("the hover title says the absence in words", () => {
+  assert.equal(
+    scoreTitle(reading({ best: 80800, bestTile: 0 })),
+    "Score: 3,128 (top tile 256) | Best: 80,800 (no tile on record)"
+  );
+});
+
 test("a player who has never taken a move back sees no bracket", () => {
   assert.ok(!scoreLine(reading()).includes("("));
 });

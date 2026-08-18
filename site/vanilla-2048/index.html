@@ -613,8 +613,10 @@
   <!-- One step further down, for the narrowest phones still in use. The score line is
        the widest thing in the panel and it must not wrap, for the reason the header
        gives: the board is sized from what two header lines leave over, so a third row is
-       a board that no longer fits. At 13px an end-game replayed board runs 300px against
-       the 290px a 320px screen leaves it; at 12px it runs 277px.
+       a board that no longer fits. What needs the step is the widest line a save can
+       hold at all -- every figure at its longest at once -- which runs 297px at 13px
+       against the 290px a 320px screen leaves it, and 288px at 12px. An end-game board a
+       real game can reach fits either way, at 282px.
 
        After the compact block rather than before it: both queries match a 320px screen
        and they carry the same specificity, so this only wins by landing second. No id,
@@ -639,7 +641,7 @@
            Every score on both lines carries the largest tile it was reached on, after a
            middot, and the fields are divided by the same single-spaced bar the readings
            line under the board uses. The pair is what makes this the widest line in the
-           panel: an end-game replayed board runs 300px of the 330px a 360px phone leaves
+           panel: an end-game replayed board runs 282px of the 330px a 360px phone leaves
            it, against 259px before the tiles were on it at all.
 
            Two lines on purpose rather than one that sometimes wraps. The board is sized
@@ -652,7 +654,7 @@
            scrubbing swaps "Moves: 4" for "Move 4/12" and back on every drag, and with
            nothing to its right there is nothing for that to shove around. The clock that
            walks back through those moves stays below, with the rest of the controls. -->
-      <p id="score-line">Score: 0·0 | Best: 0·0</p>
+      <p id="score-line">Score: 0·– | Best: 0·–</p>
       <p id="progress-line"><span id="play-time">Time: 0:00</span> | <span id="timeline-label">Moves: 0</span></p>
       <!-- The game's own controls, and after them the clock that opens the ones for
            going back through it. -->
