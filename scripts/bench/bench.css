@@ -1,0 +1,81 @@
+    /* The bench strip. Styled off the panel's own tokens so it reads as part of the same
+       page rather than as a widget bolted onto it -- its buttons are the demo's own, the
+       element selector in the stylesheet above having already sized them like imgui
+       frames. */
+    #bench {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 6px 10px;
+      margin-top: 10px;
+      font-family: var(--panel-font);
+    }
+
+    #bench-label {
+      margin: 0;
+      font-size: 10px;
+      letter-spacing: 0.09em;
+      text-transform: uppercase;
+      color: #8b95a3;
+    }
+
+    #bench-states {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+
+    /* Fixed-width digits for the reason the score line has them: every chip is a score
+       line in miniature, and they sit in a row. */
+    #bench-states button {
+      font-family: var(--panel-font);
+      font-size: 12px;
+      font-variant-numeric: tabular-nums;
+    }
+
+    #bench-states button[aria-pressed="true"] {
+      border-color: #6f8fd0;
+      background: #3a4a68;
+    }
+
+    #bench-note {
+      flex-basis: 100%;
+      margin: 0;
+      max-width: 62ch;
+      font-size: 11px;
+      line-height: 1.45;
+      color: #8b95a3;
+    }
+
+    #bench-image {
+      position: fixed;
+      inset: 0;
+      z-index: 10;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+      background: rgba(9, 11, 16, 0.82);
+    }
+
+    #bench-image[hidden] { display: none; }
+
+    #bench-image-frame {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      max-height: 100%;
+      padding: 10px;
+      border: 1px solid rgba(255, 255, 255, 0.16);
+      border-radius: 8px;
+      background: #1b1b1b;
+      overflow: auto;
+    }
+
+    #bench-image-frame canvas {
+      max-width: 100%;
+      height: auto;
+      border-radius: 4px;
+    }
+
+    #bench-image-close { align-self: flex-end; }
