@@ -1,15 +1,25 @@
 """Tests for scripts/bundle-vanilla-2048.py.
 
-What is checked is the one property the page has to have and cannot be seen to
-have by looking at it: that it asks the network for nothing. An Artifact is
-served behind a CSP that blocks every outside request, so a stylesheet, module
-or font the bundler failed to fold in does not error visibly -- the page comes
-up in the wrong face, or with a dead script, and looks like a demo bug.
+What is checked is the pair of properties the page has to have and cannot be
+seen to have by looking at it.
+
+The first is that it asks the network for nothing. An Artifact is served behind
+a CSP that blocks every outside request, so a stylesheet, module or font the
+bundler failed to fold in does not error visibly -- the page comes up in the
+wrong face, or with a dead script, and looks like a demo bug.
+
+The second is that the modules can share one scope. The bundler concatenates
+them and cuts their imports, which turns every module's top-level names into
+one namespace: two modules that each declare a private helper of the same name
+are fine as modules and a syntax error as a bundle, and the page that results
+is blank. Nothing about either module looks wrong on its own, and the served
+demo goes on working, so this is only ever found by building.
 
 Stdlib only, and the script is run as a subprocess rather than imported: its
 hyphenated name is not importable, and running it is what the justfile does.
 """
 
+import collections
 import re
 import subprocess
 import sys
@@ -87,3 +97,43 @@ class BundleTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ModuleScopeTest(unittest.TestCase):
+    """The bundled modules must not declare the same top-level name twice."""
+
+    # Enough to find the declarations the concatenated scope would collide on:
+    # every module here declares at top level with no indentation, and anything
+    # nested is indented under what encloses it.
+    DECLARATION = re.compile(
+        r"^(?:export\s+)?(?:const|let|var|function|class)\s+([A-Za-z_$][\w$]*)",
+        re.MULTILINE,
+    )
+
+    def test_no_two_modules_declare_the_same_top_level_name(self):
+        # Read out of the bundler rather than listed again here, so a module added
+        # to the build is covered by this without anything else being touched.
+        modules = re.search(
+            r"^MODULES = \[(.*?)\]", (ROOT / "scripts" / "bundle-vanilla-2048.py").read_text(),
+            re.MULTILINE | re.DOTALL,
+        )
+        self.assertIsNotNone(modules, "bundler no longer declares MODULES")
+        names = re.findall(r'"([^"]+)"', modules.group(1))
+        self.assertGreater(len(names), 1)
+
+        declared = collections.defaultdict(list)
+        for name in names:
+            for declaration in self.DECLARATION.findall((DEMO / name).read_text()):
+                declared[declaration].append(name)
+
+        clashes = {
+            declaration: sources
+            for declaration, sources in declared.items()
+            if len(sources) > 1
+        }
+        self.assertEqual(
+            clashes,
+            {},
+            "these names are declared in more than one bundled module, which is a "
+            "syntax error once the modules share a scope",
+        )

@@ -31,7 +31,7 @@ FONT = "droid-sans-latin.woff2"
 
 # Dependency order. board.js is the graph's root and game.js its only leaf, so
 # this is the order the browser would resolve them in anyway.
-MODULES = ["board.js", "format.js", "stats.js", "game.js"]
+MODULES = ["board.js", "format.js", "stats.js", "archive.js", "game.js"]
 
 
 def read_page():

@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <meta name="description" content="A 2048 port in vanilla JavaScript with a few extra features: d-pad buttons optimized for (my) thumbs on small touchscreens, time travel replay, and stats." />
+  <meta name="description" content="A 2048 port in vanilla JavaScript with a few extra features: d-pad buttons optimized for (my) thumbs on small touchscreens, time travel replay, per-game stats, and a history of past games that keeps every move." />
   <title>2048 in vanilla JavaScript</title>
   <style>
     /* The face Dear ImGui renders the other demo's window with, down to the tile
@@ -297,6 +297,7 @@
        and an emoji would arrive in the system's own colours, which this panel has
        none of. */
     #time-travel svg,
+    #past-games svg,
     #graph svg {
       width: 15px;
       height: 15px;
@@ -312,7 +313,8 @@
        They share an anchor and are never open together, so they share their chrome. */
     #new-game-confirm,
     #timeline,
-    #stats-panel {
+    #stats-panel,
+    #archive-panel {
       position: absolute;
       top: calc(100% + 6px);
       right: 0;
@@ -356,7 +358,8 @@
 
     #new-game-confirm[hidden],
     #timeline[hidden],
-    #stats-panel[hidden] { display: none; }
+    #stats-panel[hidden],
+    #archive-panel[hidden] { display: none; }
 
     /* Built out of its parts rather than themed with `accent-color`: the marker is a
        playhead, not a bubble, and a browser's own thumb cannot be made into one. */
@@ -592,6 +595,159 @@
     }
 
     #overlay[hidden] { display: none; }
+    /* Past games ----------------------------------------------------------- */
+
+    /* The one popup that scrolls, because it is the one holding something that grows.
+       Capped against the viewport rather than against the panel: what is behind it is a
+       board that nothing is waiting to move, and a list worth opening is worth being
+       able to read down. */
+    #archive-panel {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      max-height: min(62vh, 420px);
+      overflow-y: auto;
+      overscroll-behavior: contain;
+    }
+
+    #archive-panel p {
+      margin: 0;
+      line-height: 1.35;
+    }
+
+    #archive-played,
+    #archive-scored,
+    #archive-reached,
+    #archive-game-title,
+    #archive-readout {
+      font-size: 12px;
+      font-variant-numeric: tabular-nums;
+      color: #9fb3c8;
+    }
+
+    #archive-played:empty,
+    #archive-scored:empty,
+    #archive-reached:empty { display: none; }
+
+    #archive-tracks {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+
+    /* The track in force is filled with the accent a held button takes, so which one is
+       being shown is said by the same colour that says a button is being pressed. */
+    #archive-tracks button[aria-pressed="true"] {
+      border-color: #6f8fd0;
+      background: #4b6eaf;
+    }
+
+    /* One grid for the header and every row, so the columns line up down the list
+       without any of them being given a width in pixels: the figures set their own, and
+       the date column takes what is left. */
+    /* One grid for the whole list, and every row a subgrid of it, so the five columns are
+       measured once over every game rather than once per row. A row that sizes its own
+       columns only lines up with the row above it while their figures happen to be the
+       same width: a game that scored 492 and one that scored 24,576 disagree about where
+       the score column starts, and the header disagrees with both.
+
+       The widths come from the figures rather than being set in pixels: the date column
+       takes what the four figure columns leave, and those take what their widest entry
+       needs -- which is what keeps a list of three-digit scores from reserving room for
+       a five-digit one it does not hold. */
+    #archive-list {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) repeat(4, auto);
+      column-gap: 10px;
+      row-gap: 2px;
+    }
+
+    .archive-row {
+      display: grid;
+      grid-column: 1 / -1;
+      grid-template-columns: subgrid;
+      align-items: baseline;
+      /* Both together: a row is a button on the games that kept their moves and a div on
+         the ones that did not, and only the button gets border-box from the browser --
+         so without this the plain rows carry their padding outside the full width and
+         push the panel into a horizontal scroll the button rows never show. */
+      box-sizing: border-box;
+      width: 100%;
+      padding: 3px 6px;
+      border: 1px solid transparent;
+      border-radius: 4px;
+      background: none;
+      font: inherit;
+      font-size: 12px;
+      font-variant-numeric: tabular-nums;
+      text-align: right;
+      color: #e6edf3;
+    }
+
+    /* The date reads left, every figure reads right: a column of numbers is scanned down
+       its last digit, and a column of dates down its first letter. */
+    .archive-when { text-align: left; }
+
+    .archive-head {
+      color: #9fb3c8;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.14);
+      border-radius: 0;
+    }
+
+    /* A row that can be opened says so by lifting under the pointer; one that cannot is
+       a div and never does. Nothing else marks the difference, which is the whole of how
+       the list says which games kept their moves. */
+    button.archive-row { cursor: pointer; }
+    button.archive-row:hover { background: rgba(255, 255, 255, 0.06); }
+    button.archive-row.opened {
+      border-color: rgba(255, 255, 255, 0.18);
+      background: rgba(255, 255, 255, 0.08);
+    }
+    button.archive-row:focus-visible { outline: 2px solid #6f8fd0; outline-offset: -2px; }
+
+    /* A game thrown away before the board ran out. Set in the label grey rather than
+       marked with a glyph, for the reason archiveRow gives. */
+    .archive-score.discarded { color: #9fb3c8; }
+
+    .archive-empty {
+      font-size: 12px;
+      color: #9fb3c8;
+    }
+
+    /* Said to a screen reader and to nothing else: what the dimming above means, for a
+       reader who is not going to see it. Clipped to nothing rather than hidden, since
+       `display: none` and `visibility: hidden` both take it out of the accessibility
+       tree along with the picture. */
+    .visually-hidden {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      overflow: hidden;
+      clip-path: inset(50%);
+      white-space: nowrap;
+    }
+
+    /* Set apart from the list above it, since it is about one row of it rather than
+       about all of them. */
+    #archive-game {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      padding-top: 6px;
+      border-top: 1px solid rgba(255, 255, 255, 0.14);
+    }
+
+    #archive-game[hidden] { display: none; }
+
+    #archive-chart {
+      display: block;
+      width: 100%;
+      height: 148px;
+      touch-action: none;
+    }
+
+    #archive-chart[hidden] { display: none; }
+
     #overlay strong { color: #fff; }
     #overlay small { color: #9fb3c8; }
     #overlay button { margin-top: 10px; }
@@ -607,6 +763,13 @@
     #board-wrap { margin: 2px 0; }
     #chart { height: 148px; }
     #chart-legend, #chart-readout { font-size: 11px; }
+    #archive-chart { height: 124px; }
+    #archive-panel { max-height: 58vh; }
+    #archive-played, #archive-scored, #archive-reached,
+    #archive-game-title, #archive-readout, .archive-row, .archive-empty { font-size: 11px; }
+    /* The narrowest column goes first on a phone: a list of games is scanned for what
+       they were worth, and the date is what can afford to lose the room. */
+    .archive-row { gap: 6px; }
     #overlay { inset: 8px; max-width: calc(100% - 16px); padding: 8px 10px; border-radius: 8px; font-size: 12px; }
   </style>
 
@@ -714,6 +877,21 @@
             <path d="M3.5 17.5 L9.5 9.5 L14 13.5 L20.5 6.5" />
           </svg>
         </button>
+        <!-- The games that are over. A stack of rules rather than a clock or a spark
+             line: what this opens is a list, and the two icons beside it are already
+             using the shapes that mean "this game". The last rule is short, which is
+             what keeps three equal lines from reading as a hamburger menu. -->
+        <button
+          id="past-games"
+          type="button"
+          aria-label="Past games"
+          aria-expanded="false"
+          aria-controls="archive-panel"
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M4 7.5 H20 M4 12 H20 M4 16.5 H13" />
+          </svg>
+        </button>
 
         <!-- The slider is the whole game so far, one stop per move; the buttons beside
              it step a single move, for touch and for precision.
@@ -771,6 +949,41 @@
                bin. A canvas cannot be read by a screen reader and a hovered tooltip
                cannot be read at all, so the reading lives on a line of its own. -->
           <p id="chart-readout"></p>
+        </div>
+
+        <!-- Every game that has ended, and the figures read across them. The list is
+             what accumulates; the three lines above it are what the list is for.
+
+             Taller than the other popups and the only one that scrolls, because it is
+             the only one holding something that grows. Play is stopped while it is up,
+             as under either other popup, so the board it covers is not a board anything
+             is waiting to move. -->
+        <div id="archive-panel" hidden>
+          <!-- The same split the score line draws with its asterisk: a game played on
+               from an earlier state is not the achievement a straight one is, so the
+               figures can be asked of either track or of everything. -->
+          <p id="archive-tracks">
+            <button type="button" data-track="all" aria-pressed="true">All</button>
+            <button type="button" data-track="clean" aria-pressed="false">Clean</button>
+            <button type="button" data-track="replayed" aria-pressed="false">Replayed</button>
+          </p>
+          <!-- How much has been played, how well, and how far: three questions, three
+               lines, painted by the script. -->
+          <p id="archive-played"></p>
+          <p id="archive-scored"></p>
+          <p id="archive-reached"></p>
+          <div id="archive-list"></div>
+          <!-- One past game, rebuilt from the moves it was played with and drawn into
+               the same graph the live game draws. Hidden until a row is opened. -->
+          <div id="archive-game" hidden>
+            <p id="archive-game-title"></p>
+            <canvas
+              id="archive-chart"
+              role="img"
+              aria-label="Points, points gained and undos by move, for the past game opened below the list"
+            ></canvas>
+            <p id="archive-readout"></p>
+          </div>
         </div>
       </div>
       <!-- How to play, and where the game says its piece: a message stands in for the

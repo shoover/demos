@@ -3,9 +3,21 @@
  * board.js holds the rules and knows nothing about any of this.
  */
 
-import { SIZE, Game, SaveError, decodeSavedState } from "./board.js";
+import { SIZE, Game, SaveError, decodeSavedState, replaySpawns, topTileOf } from "./board.js";
 import { abbreviate, count, formatDuration, scoreLine, scoreTitle } from "./format.js";
 import { binGame } from "./stats.js";
+import {
+  ArchiveError,
+  ENDED_DISCARDED,
+  ENDED_GAME_OVER,
+  addGame,
+  archiveStats,
+  decodeArchive,
+  encodeArchive,
+  isClean,
+  milestones,
+  summarize,
+} from "./archive.js";
 
 const BEST_SCORE_KEY = "vanilla-2048.bestScore";
 // The best score reached in a game that was played on from an earlier state. A separate
@@ -95,6 +107,17 @@ const elements = {
   statsPanel: document.getElementById("stats-panel"),
   chart: document.getElementById("chart"),
   chartReadout: document.getElementById("chart-readout"),
+  pastGames: document.getElementById("past-games"),
+  archivePanel: document.getElementById("archive-panel"),
+  archiveTracks: document.getElementById("archive-tracks"),
+  archivePlayed: document.getElementById("archive-played"),
+  archiveScored: document.getElementById("archive-scored"),
+  archiveReached: document.getElementById("archive-reached"),
+  archiveList: document.getElementById("archive-list"),
+  archiveGame: document.getElementById("archive-game"),
+  archiveGameTitle: document.getElementById("archive-game-title"),
+  archiveChart: document.getElementById("archive-chart"),
+  archiveReadout: document.getElementById("archive-readout"),
 };
 
 const compactMedia = window.matchMedia(
@@ -116,6 +139,7 @@ function popupOpen() {
   return (
     !elements.timeline.hidden ||
     !elements.statsPanel.hidden ||
+    !elements.archivePanel.hidden ||
     !elements.newGameConfirm.hidden
   );
 }
@@ -183,6 +207,220 @@ function saveBests() {
     game.replayed ? BEST_REPLAYED_TILE_KEY : BEST_TILE_KEY,
     String(game.ownBestTile)
   );
+}
+
+/* Archive ------------------------------------------------------------------- */
+
+/**
+ * The games that are over, and the moves of the ones that were recorded.
+ *
+ * Two stores, because the two records are read at different times and are three orders
+ * of magnitude apart in size. The rows are small, are wanted all at once every time the
+ * list is opened, and have to be readable wherever the game is -- so they sit in
+ * localStorage beside the save, where reading them is a parse and nothing else. The
+ * spawn logs are the moves themselves, are wanted one at a time and only when a row is
+ * opened, and are bytes rather than text -- so they sit in IndexedDB, one record per
+ * game, where a log can be fetched without the other nine hundred coming with it and a
+ * byte costs a byte instead of the 1.33 base64 would charge.
+ *
+ * The split also decides what happens when only one of them works. IndexedDB is refused
+ * in places localStorage is not, and a list that still lists is worth more than a replay
+ * that never arrives: a row whose log cannot be stored is still a row, and says so.
+ */
+const ARCHIVE_KEY = "vanilla-2048.archive.v1";
+// Which game the save in GAME_STATE_KEY is, so a reload can tell whether the game it
+// finds is one the archive has already been told about. Kept beside the save rather than
+// inside it for the reason the best scores are: it is bookkeeping about the game, not
+// part of the board, and board.js has no business knowing this list exists.
+const CURRENT_GAME_KEY = "vanilla-2048.currentGame";
+const LOG_DB_NAME = "vanilla-2048";
+const LOG_DB_VERSION = 1;
+const LOG_STORE = "spawns";
+
+// The archive as it stands, newest game first, and what went wrong reading it. A fault
+// is reported in the panel where the list would have been: the game is entirely
+// playable without its own history, so this must not reach the recovery overlay, which
+// is for a save that leaves nothing to play.
+let archive = [];
+let archiveFault = null;
+
+/** The id of the game being played, which the archive files its row under. */
+let currentGameId = null;
+
+// Enough to tell a thousand games apart in one browser, which is the whole job: the id
+// is a key into two local stores and is never seen by anyone. crypto.randomUUID would do
+// it too, and is unavailable on exactly the insecure origins this demo is often served
+// from -- so this asks for nothing rather than branching on what it was given.
+const newGameId = () =>
+  `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+
+function loadArchive() {
+  try {
+    archive = decodeArchive(storage.getItem(ARCHIVE_KEY));
+    archiveFault = null;
+  } catch (error) {
+    if (!(error instanceof ArchiveError)) {
+      throw error;
+    }
+    // The rows are left empty rather than partially recovered. Half an archive read past
+    // a bad row is a set of figures computed over an unknown fraction of the games, and
+    // there is nothing on screen that could say which fraction.
+    archive = [];
+    archiveFault = error.message;
+  }
+}
+
+function persistArchive() {
+  storage.setItem(ARCHIVE_KEY, encodeArchive(archive));
+}
+
+/* Spawn log store ----------------------------------------------------------- */
+
+// Opened once and shared. Null resolves where IndexedDB is refused -- a sandboxed frame,
+// a private window, a browser told to block site data -- which is the same known case
+// the localStorage shim above handles, and is handled the same way: the feature that
+// needs it goes quiet, and the row says the moves were not kept.
+let logDatabase = null;
+
+function openLogStore() {
+  if (logDatabase === null) {
+    logDatabase = new Promise((resolve) => {
+      let request;
+      try {
+        request = indexedDB.open(LOG_DB_NAME, LOG_DB_VERSION);
+      } catch {
+        resolve(null);
+        return;
+      }
+      request.onupgradeneeded = () => request.result.createObjectStore(LOG_STORE);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => resolve(null);
+      // Another tab holding the old version open. Waiting for it would hang the panel on
+      // a promise that may never settle, and the list does not need the logs to open.
+      request.onblocked = () => resolve(null);
+    });
+  }
+  return logDatabase;
+}
+
+/** Run `work` against the log store, or resolve `fallback` where there is no store. */
+async function withLogStore(mode, work, fallback) {
+  const database = await openLogStore();
+  if (database === null) {
+    return fallback;
+  }
+  return new Promise((resolve) => {
+    const transaction = database.transaction(LOG_STORE, mode);
+    const request = work(transaction.objectStore(LOG_STORE));
+    transaction.onerror = () => resolve(fallback);
+    transaction.onabort = () => resolve(fallback);
+    request.onsuccess = () => resolve(request.result);
+  });
+}
+
+/**
+ * Everything a finished game can be drawn from again: its spawns, and where it was
+ * taken back.
+ *
+ * The spawns are stored as bytes rather than as the base64 the save carries, because
+ * IndexedDB takes a typed array as it stands -- so the log costs exactly the one byte a
+ * move it was designed to, and the third the save pays to be text is not paid twice.
+ *
+ * The undo positions ride along because they are the one thing replay cannot recover.
+ * The log holds the line of play that survived, so a take-back leaves no trace in it;
+ * the tallies were counted while the game was played, and if they are not written down
+ * beside it the graph comes back with an empty lane under a legend that promises one.
+ * They are here rather than on the archive row for the same reason the log is: the row
+ * is read every time the list opens, and this is read when a game is opened.
+ */
+const storeGameRecord = (id, spawns, undos) =>
+  withLogStore(
+    "readwrite",
+    (store) => store.put({ spawns: Uint8Array.from(spawns), undos }, id),
+    undefined
+  );
+
+const readGameRecord = async (id) => {
+  const record = await withLogStore("readonly", (store) => store.get(id), undefined);
+  return record === undefined
+    ? null
+    : { spawns: Array.from(record.spawns), undos: record.undos };
+};
+
+/**
+ * Drop the logs of games the archive no longer lists.
+ *
+ * A full reconcile rather than a delete beside each eviction: the rows are what say
+ * which games exist, so anything in the store without a row is weight with nothing to
+ * reach it by -- whether it was evicted past ARCHIVE_LIMIT, lost with a cleared archive,
+ * or left by a build that wrote its rows somewhere else. It runs once per finished game,
+ * against a list of keys, which is far too cheap to be worth being cleverer about.
+ */
+async function pruneSpawnLogs() {
+  const kept = new Set(archive.map((row) => row.id));
+  const stored = await withLogStore("readonly", (store) => store.getAllKeys(), []);
+  const orphans = stored.filter((id) => !kept.has(id));
+  if (orphans.length > 0) {
+    await withLogStore(
+      "readwrite",
+      (store) => {
+        for (const id of orphans.slice(0, -1)) {
+          store.delete(id);
+        }
+        // The last one's request is the one the transaction is watched through; the rest
+        // ride the same transaction and land with it.
+        return store.delete(orphans[orphans.length - 1]);
+      },
+      undefined
+    );
+  }
+}
+
+/**
+ * Write the game as it now stands into the archive.
+ *
+ * How it ended is read off the board rather than passed in by the caller, which is what
+ * keeps a row honest through the one sequence that would otherwise break it: a finished
+ * game can be taken back into a playable one and played on, so a row filed once as over
+ * would go on describing a game that is no longer over. Every path that can end a game
+ * calls this, the row is filed under the game's id, and the newest telling replaces the
+ * last -- so the archive holds what the game finally came to however many times it was
+ * asked.
+ *
+ * A board still on its opening tiles is not a game and is not filed. Nothing was played,
+ * so there is nothing the list could say about it that its absence does not.
+ */
+function archiveGame() {
+  const latest = game.latest;
+  if (latest.moves === 0) {
+    return;
+  }
+  const row = summarize({
+    id: currentGameId,
+    endedAt: Date.now(),
+    ending: latest.gameOver ? ENDED_GAME_OVER : ENDED_DISCARDED,
+    score: latest.score,
+    // Off the newest board, not the one on screen: the game is what is being filed, and
+    // the scrubber may well have been left somewhere in the middle of it.
+    topTile: topTileOf(latest.cells),
+    moves: latest.moves,
+    undos: game.history.reduce((total, entry) => total + entry.undos, 0),
+    seconds: playTime.elapsed(),
+    replayedFrom: game.replayedFrom,
+    recorded: game.spawns !== null,
+  });
+  archive = addGame(archive, row);
+  persistArchive();
+  if (game.spawns !== null) {
+    const undos = Object.fromEntries(
+      game.history.filter((entry) => entry.undos > 0).map((entry) => [entry.moves, entry.undos])
+    );
+    // Not awaited: the archive row is what the list is made of and it is already
+    // written, so the moves landing a beat later costs nothing on screen. Awaiting it
+    // would put an IndexedDB round trip in front of the repaint that draws the game-over
+    // board, which is the one frame of this that anybody sees.
+    storeGameRecord(row.id, game.spawns, undos).then(pruneSpawnLogs);
+  }
 }
 
 /* Play time ---------------------------------------------------------------- */
@@ -584,6 +822,9 @@ function setTimelineOpen(open) {
   if (open && !elements.statsPanel.hidden) {
     setStatsOpen(false);
   }
+  if (open && !elements.archivePanel.hidden) {
+    setArchiveOpen(false);
+  }
   elements.timeline.hidden = !open;
   elements.timeTravel.setAttribute("aria-expanded", String(open));
   if (open) {
@@ -741,11 +982,11 @@ function binAt(x) {
  * Both readings name their span of moves first, so pointing at a bin swaps one sentence
  * for another of the same shape rather than adding one.
  */
-function chartReadout(stats) {
+function chartReadout(stats, hovered) {
   // The one place a figure here is not a bare number: "1 undos" reads as a bug in a line
   // that is otherwise plain English.
   const undos = (total) => `${count(total)} ${total === 1 ? "undo" : "undos"}`;
-  const bin = hoveredBin === null ? null : stats.bins[hoveredBin];
+  const bin = hovered === null ? null : stats.bins[hovered];
   if (bin === null) {
     return (
       `Moves ${count(stats.firstMove)}-${count(stats.lastMove)}` +
@@ -792,12 +1033,17 @@ function chartReadout(stats) {
  *
  * Cheap enough to run from paintPanel on every move -- a hundred bins is a hundred line
  * segments -- so nothing has to work out whether the graph has gone stale.
+ *
+ * Takes its canvas and its binned game rather than reaching for the live ones, because
+ * there are two graphs now: the one the game is drawing as it is played, and the one an
+ * archived game is redrawn into when its row is opened. They are the same picture of the
+ * same kind of thing, so they are the same code -- a second implementation would agree
+ * with this one right up until the day one of them was changed.
+ *
+ * Returns the geometry the paint used, which is what turns a pointer position into the
+ * bin under it. Only the live graph has a use for it; the archived one is not hovered.
  */
-function paintChart() {
-  if (elements.statsPanel.hidden) {
-    return;
-  }
-  const canvas = elements.chart;
+function drawChart(canvas, stats, hovered) {
   const width = canvas.clientWidth;
   const height = canvas.clientHeight;
   // The backing store is the display's pixels, and is resized only when it has to be:
@@ -814,21 +1060,10 @@ function paintChart() {
   context.setTransform(ratio, 0, 0, ratio, 0, 0);
   context.clearRect(0, 0, width, height);
 
-  // Binned from the history, not the timeline: the timeline is capped, so binning it
-  // would draw the newest thousand moves and call them the game.
-  const stats = binGame(game.history);
-  // The bin under the pointer need not have survived: taking moves back shortens the
-  // axis, and the bin that was being read can simply be gone. The pointer is not tracked
-  // between repaints, so there is nothing to re-derive it from -- the graph goes back to
-  // reading out the whole game until the pointer moves and names a bin that exists.
-  if (hoveredBin !== null && hoveredBin >= stats.bins.length) {
-    hoveredBin = null;
-  }
   const plotLeft = CHART_GUTTER;
   const plotRight = width - CHART_PAD_RIGHT;
   const plotBottom = height - CHART_PAD_BOTTOM;
   const binPixels = (plotRight - plotLeft) / stats.bins.length;
-  chartGeometry = { plotLeft, binPixels, binCount: stats.bins.length };
 
   // The lanes, stacked top to bottom, each given its share of what the gaps leave over.
   const names = Object.keys(CHART_LANES);
@@ -872,9 +1107,9 @@ function paintChart() {
 
   // The bin being pointed at, behind everything: a band rather than a crosshair, since
   // what is being read off it is a span of moves and not a single one.
-  if (hoveredBin !== null) {
+  if (hovered !== null) {
     context.fillStyle = CHART_HOVER_COLOR;
-    context.fillRect(plotLeft + hoveredBin * binPixels, CHART_PAD_TOP, binPixels, plotBottom - CHART_PAD_TOP);
+    context.fillRect(plotLeft + hovered * binPixels, CHART_PAD_TOP, binPixels, plotBottom - CHART_PAD_TOP);
   }
 
   // One baseline per lane: three rules are enough to say where each series is measured
@@ -976,7 +1211,31 @@ function paintChart() {
     context.stroke();
   }
 
-  elements.chartReadout.textContent = chartReadout(stats);
+  return { plotLeft, binPixels, binCount: stats.bins.length };
+}
+
+/**
+ * The live graph: the game as it now stands, and the bin the pointer is on.
+ *
+ * Skipped outright while the popup is away, which is what lets this hang off paintPanel
+ * and run on every move without asking anything about staleness.
+ */
+function paintChart() {
+  if (elements.statsPanel.hidden) {
+    return;
+  }
+  // Binned from the history, not the timeline: the timeline is capped, so binning it
+  // would draw the newest thousand moves and call them the game.
+  const stats = binGame(game.history);
+  // The bin under the pointer need not have survived: taking moves back shortens the
+  // axis, and the bin that was being read can simply be gone. The pointer is not tracked
+  // between repaints, so there is nothing to re-derive it from -- the graph goes back to
+  // reading out the whole game until the pointer moves and names a bin that exists.
+  if (hoveredBin !== null && hoveredBin >= stats.bins.length) {
+    hoveredBin = null;
+  }
+  chartGeometry = drawChart(elements.chart, stats, hoveredBin);
+  elements.chartReadout.textContent = chartReadout(stats, hoveredBin);
 }
 
 /**
@@ -990,12 +1249,359 @@ function setStatsOpen(open) {
   if (open && !elements.timeline.hidden) {
     closeTimeline();
   }
+  if (open && !elements.archivePanel.hidden) {
+    setArchiveOpen(false);
+  }
   elements.statsPanel.hidden = !open;
   elements.graph.setAttribute("aria-expanded", String(open));
   // Whatever was under the pointer belonged to the last time it was open.
   hoveredBin = null;
   syncPlayState();
   paintChart();
+}
+
+/* Past games ---------------------------------------------------------------- */
+
+// Which games the figures are computed over. Three rather than two, because "all" is a
+// real question and not a missing filter: how much has been played is asked of
+// everything, and how well is asked of one track or the other. The split is the score
+// line's own -- a game played on from an earlier state is not the achievement a straight
+// one is -- and it is drawn here for the same reason the asterisk is drawn there.
+const ARCHIVE_TRACKS = {
+  all: () => true,
+  clean: isClean,
+  replayed: (row) => !isClean(row),
+};
+let archiveTrack = "all";
+// The game whose graph is open under the list, or null. Held by id rather than by row,
+// because the list it was picked from is rebuilt on every paint.
+let openedGame = null;
+
+// The single-spaced bar the score line and the readings line under the board both use,
+// rather than the wide one the chart readout is written with. These lines carry five
+// fields on a panel as narrow as the board, and the four characters a wide divider costs
+// each time are the difference between a line that fits and a line that wraps its last
+// field onto a row of its own. The readout below the archived graph keeps the wide one:
+// it is the live graph's own line, printed by the same function.
+const FIELD = " | ";
+
+/** A stored game's end time, at the width a list of them can be scanned down. */
+function formatWhen(at) {
+  const when = new Date(at);
+  const date = when.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+  const time = when.toLocaleTimeString("en-US", {
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: false,
+  });
+  return `${date} ${time}`;
+}
+
+/**
+ * The figures over the games being shown, in three lines.
+ *
+ * Split by what is being asked rather than by what is cheap to compute together: the
+ * first line is how much has been played, the second is how well, and the third is how
+ * far. Read down, they answer the three questions a list of finished games raises, and
+ * none of the three lines is worth reading against the others.
+ */
+function archiveSummary(rows) {
+  const stats = archiveStats(rows);
+  const played = [
+    `${count(stats.games)} ${stats.games === 1 ? "game" : "games"}`,
+    `${count(stats.finished)} finished`,
+    `${count(stats.totalMoves)} moves`,
+    formatDuration(stats.totalSeconds),
+    // Taking back sits on this line rather than among the scores, because it is a fact
+    // about how the games were played and not about what they came to. Two readings of
+    // it, for the reason archiveStats gives: a total says how much of it happens, and
+    // the clean count says how often it happens at all.
+    `${count(stats.totalUndos)} undos (${count(stats.gamesWithoutUndo)} clean)`,
+  ];
+  // Median and mean both, because 2048 scores are skewed and the two answer different
+  // questions: see archiveStats. A median above the mean is the shape of a run of even
+  // games; well below it, of one game that went much better than the rest.
+  const scored = [
+    `Best ${abbreviate(stats.bestScore)}`,
+    `Median ${abbreviate(stats.medianScore)}`,
+    `Mean ${abbreviate(stats.meanScore)}`,
+    `${stats.pointsPerMove.toFixed(1)}/move`,
+  ];
+  return [played.join(FIELD), scored.join(FIELD)];
+}
+
+/**
+ * How far the games got, as a funnel: how many reached each milestone tile.
+ *
+ * Milestones a game reached rather than the tile it finished on, so the counts nest --
+ * every 2048 game is also a 1024 game. Read down it says where games stop, which is what
+ * the largest tile alone cannot: a list of best tiles says what the peak was, and this
+ * says how often it is reached.
+ *
+ * Milestones no game has reached are left out rather than printed as zeroes. A row of
+ * zeroes above the tiles that were actually reached is a line about what has not
+ * happened, and the line is read for what has.
+ */
+function archiveMilestones(rows) {
+  const reached = milestones(rows).filter((milestone) => milestone.games > 0);
+  if (reached.length === 0) {
+    return "";
+  }
+  return `Reached${FIELD}${reached
+    .map((milestone) => `${milestone.tile} ×${count(milestone.games)}`)
+    .join(FIELD)}`;
+}
+
+/**
+ * One row of the list: when the game was, what it was worth, and what it took.
+ *
+ * A button where the moves were kept and a plain row where they were not, which is the
+ * whole of how the list says which is which. A row that cannot be opened does not look
+ * like one that can, so nothing has to explain the difference in words -- and the games
+ * that cannot be opened are the ones finished before the log existed, which will age out
+ * of the archive on their own.
+ *
+ * The score carries its largest tile after a middot and its asterisk when the game was
+ * replayed, which is the score line's own notation: a score in this demo has meant a
+ * pair since tiles were tracked, and a list of them is no place to start meaning
+ * something else.
+ */
+function archiveRow(row) {
+  const element = document.createElement(row.rec ? "button" : "div");
+  element.className = "archive-row";
+  if (row.rec) {
+    element.type = "button";
+    element.dataset.id = row.id;
+    element.setAttribute("aria-expanded", String(openedGame === row.id));
+  }
+  if (openedGame === row.id) {
+    element.classList.add("opened");
+  }
+  const cell = (text, className, title) => {
+    const span = document.createElement("span");
+    span.className = className;
+    span.textContent = text;
+    if (title) {
+      span.title = title;
+    }
+    return span;
+  };
+  // A discarded game is marked where the reading it changes is, which is the score: it is
+  // not what the game came to but what it had got to when it was thrown away.
+  //
+  // Marked by weight rather than by a glyph. The mark for it used to be a trailing
+  // ellipsis, which is the one punctuation a reader already has a meaning for at the end
+  // of a figure in a narrow column: text that did not fit. A column of "492·64…" reads as
+  // a column of clipped numbers, and the more discarded games in the list the more the
+  // whole table looks broken -- so the score is dimmed to the colour the labels are set
+  // in instead, and nothing is appended to a number that is complete.
+  //
+  // The colour is not carrying it alone. A screen reader gets the word, the pointer gets
+  // the sentence, and the line above the list gives the count -- so "how many of these
+  // were played out" is answerable without seeing the dimming at all.
+  const discarded = row.end === ENDED_DISCARDED;
+  const score = cell(
+    `${abbreviate(row.score)}·${row.tile === 0 ? "–" : row.tile}${isClean(row) ? "" : "*"}`,
+    `archive-score${discarded ? " discarded" : ""}`,
+    discarded ? "Discarded before the board ran out" : ""
+  );
+  if (discarded) {
+    const note = document.createElement("span");
+    note.className = "visually-hidden";
+    note.textContent = " (discarded)";
+    score.append(note);
+  }
+  element.append(
+    cell(formatWhen(row.at), "archive-when"),
+    score,
+    cell(count(row.moves), "archive-moves"),
+    cell(formatDuration(row.secs), "archive-secs"),
+    cell(row.undos === 0 ? "–" : count(row.undos), "archive-undos")
+  );
+  return element;
+}
+
+/**
+ * Paint the list of finished games and the figures over them.
+ *
+ * Skipped while the popup is away, the same way the live graph is: this hangs off the
+ * move that ends a game, and there is no sense building a list nothing is looking at.
+ */
+function paintArchive() {
+  if (elements.archivePanel.hidden) {
+    return;
+  }
+  for (const button of elements.archiveTracks.querySelectorAll("button")) {
+    button.setAttribute("aria-pressed", String(button.dataset.track === archiveTrack));
+  }
+
+  // The fault is shown where the list would have been, and says what to do about it: a
+  // record that will not parse is a permanent dead end on its own, exactly as a corrupt
+  // save is, and the one action that clears it is the one thing worth offering.
+  if (archiveFault !== null) {
+    elements.archivePlayed.textContent = "Past games could not be read.";
+    elements.archiveScored.textContent = archiveFault;
+    elements.archiveReached.textContent = "";
+    const clear = document.createElement("button");
+    clear.type = "button";
+    clear.id = "clear-archive";
+    clear.textContent = "Clear past games";
+    clear.addEventListener("click", () => {
+      storage.removeItem(ARCHIVE_KEY);
+      loadArchive();
+      pruneSpawnLogs();
+      paintArchive();
+    });
+    elements.archiveList.replaceChildren(clear);
+    elements.archiveGame.hidden = true;
+    return;
+  }
+
+  const rows = archive.filter(ARCHIVE_TRACKS[archiveTrack]);
+  const [played, scored] = archiveSummary(rows);
+  elements.archivePlayed.textContent = rows.length === 0 ? "" : played;
+  elements.archiveScored.textContent = rows.length === 0 ? "" : scored;
+  elements.archiveReached.textContent = rows.length === 0 ? "" : archiveMilestones(rows);
+
+  if (rows.length === 0) {
+    // What is missing depends on which track is being asked about, and the difference is
+    // worth a sentence: an empty archive and an archive with nothing in this track are
+    // not the same absence, and only one of them is fixed by playing a game.
+    const nothing = document.createElement("p");
+    nothing.className = "archive-empty";
+    nothing.textContent =
+      archive.length === 0
+        ? "No finished games yet. A game joins this list when it ends or is discarded."
+        : `No ${archiveTrack} games yet.`;
+    elements.archiveList.replaceChildren(nothing);
+    elements.archiveGame.hidden = true;
+    return;
+  }
+
+  const header = document.createElement("div");
+  header.className = "archive-row archive-head";
+  header.setAttribute("aria-hidden", "true");
+  for (const [text, className] of [
+    ["Ended", "archive-when"],
+    ["Score", "archive-score"],
+    ["Moves", "archive-moves"],
+    ["Time", "archive-secs"],
+    ["Undos", "archive-undos"],
+  ]) {
+    const span = document.createElement("span");
+    span.className = className;
+    span.textContent = text;
+    header.append(span);
+  }
+  elements.archiveList.replaceChildren(header, ...rows.map(archiveRow));
+
+  // The opened game may not be in the track being shown, or may have aged out of the
+  // archive entirely while it was open. Either way what is under the list no longer
+  // belongs to anything in it.
+  if (openedGame !== null && !rows.some((row) => row.id === openedGame)) {
+    closeArchivedGame();
+  }
+}
+
+function closeArchivedGame() {
+  openedGame = null;
+  elements.archiveGame.hidden = true;
+}
+
+/**
+ * Open a finished game: rebuild it from its record and draw the graph the live game
+ * draws.
+ *
+ * The whole of the reconstruction is replaySpawns -- the same rules, replaying the same
+ * spawns -- and the whole of the drawing is drawChart, which is what the game is drawing
+ * as it is played. Nothing here knows how a 2048 move works or how a lane is scaled, and
+ * that is the point: an archived game is not a different kind of game.
+ *
+ * The undo tallies come off the stored record and are put back on the rebuilt history,
+ * because they are the one thing the moves cannot say: see storeGameRecord.
+ */
+async function openArchivedGame(id) {
+  const row = archive.find((game) => game.id === id);
+  if (row === undefined) {
+    return;
+  }
+  openedGame = id;
+  elements.archiveGame.hidden = false;
+  elements.archiveGameTitle.textContent = `${formatWhen(row.at)}${FIELD}rebuilding…`;
+  elements.archiveReadout.textContent = "";
+
+  const record = await readGameRecord(id);
+  // Raced past: another row was opened, or the panel was closed, while this was being
+  // fetched. Painting now would drop one game's graph under another game's heading.
+  if (openedGame !== id) {
+    return;
+  }
+  if (record === null) {
+    // The row said the moves were kept and the store does not have them. That is the
+    // shape of a store this browser refuses -- a private window, a sandboxed frame --
+    // and it is worth saying plainly rather than leaving an empty frame.
+    elements.archiveGameTitle.textContent =
+      `${formatWhen(row.at)}${FIELD}moves unavailable`;
+    elements.archiveReadout.textContent =
+      "This browser is not keeping move records. The figures above are unaffected.";
+    elements.archiveChart.hidden = true;
+    return;
+  }
+
+  let rebuilt;
+  try {
+    rebuilt = replaySpawns(record.spawns);
+  } catch (error) {
+    if (!(error instanceof SaveError)) {
+      throw error;
+    }
+    elements.archiveGameTitle.textContent = `${formatWhen(row.at)}${FIELD}record unusable`;
+    elements.archiveReadout.textContent = error.message;
+    elements.archiveChart.hidden = true;
+    return;
+  }
+
+  const history = rebuilt.history.map((entry) => ({
+    ...entry,
+    undos: record.undos[entry.moves] ?? 0,
+  }));
+  const stats = binGame(history);
+  elements.archiveChart.hidden = false;
+  drawChart(elements.archiveChart, stats, null);
+  // Named by what it rebuilt rather than by what the row claimed, and the two are
+  // printed together: they are two records of one game written at different times and by
+  // different means, so a disagreement between them is worth seeing rather than hiding.
+  // Agreement is the ordinary case and reads as a plain restatement of the row.
+  const agrees = rebuilt.latest.score === row.score && rebuilt.latest.moves === row.moves;
+  elements.archiveGameTitle.textContent =
+    `${formatWhen(row.at)}${FIELD}${count(rebuilt.latest.moves)} moves rebuilt from ` +
+    `${count(record.spawns.length)} bytes` +
+    (agrees ? "" : `${FIELD}does not match the archived row`);
+  elements.archiveReadout.textContent = chartReadout(stats, null);
+}
+
+/**
+ * Show or hide the list of past games.
+ *
+ * A third popup on the anchor the other two share, so opening it puts either of them
+ * away and puts the newest state back on the board, exactly as they do to each other.
+ */
+function setArchiveOpen(open) {
+  if (open) {
+    if (!elements.timeline.hidden) {
+      closeTimeline();
+    }
+    if (!elements.statsPanel.hidden) {
+      setStatsOpen(false);
+    }
+  }
+  elements.archivePanel.hidden = !open;
+  elements.pastGames.setAttribute("aria-expanded", String(open));
+  if (!open) {
+    closeArchivedGame();
+  }
+  syncPlayState();
+  paintArchive();
 }
 
 // What the game currently has to say, or "" when it has nothing. Kept here rather than
@@ -1222,6 +1828,11 @@ function requestNewGame() {
 }
 
 function startNewGame() {
+  // Before the board is thrown away, since it is what the row is made of. A game with no
+  // moves on it files nothing, which is what makes this safe to call from startup.
+  archiveGame();
+  currentGameId = newGameId();
+  storage.setItem(CURRENT_GAME_KEY, currentGameId);
   const spawned = game.reset();
   slide = null;
   lastMoveAt = -Infinity;
@@ -1319,6 +1930,13 @@ function applyMove(direction) {
   );
 
   paintPanel();
+  // The move that locked the board is the moment the game became a finished one, so it
+  // is filed here rather than being noticed later by whatever next asks. Filed before the
+  // save below, so the two records of the game agree from the first frame it is over.
+  if (game.latest.gameOver) {
+    archiveGame();
+    paintArchive();
+  }
   commitChange(result.bestChanged || result.bestTileChanged);
 }
 
@@ -1427,6 +2045,12 @@ window.addEventListener("keydown", (event) => {
     elements.graph.focus();
     return;
   }
+  if (event.key === "Escape" && !elements.archivePanel.hidden) {
+    event.preventDefault();
+    setArchiveOpen(false);
+    elements.pastGames.focus();
+    return;
+  }
   // No answer is the answer: the game on the board is the one that keeps playing.
   if (event.key === "Escape" && !elements.newGameConfirm.hidden) {
     event.preventDefault();
@@ -1478,7 +2102,7 @@ elements.main.addEventListener("touchstart", (event) => {
   if (
     event.touches.length !== 1 ||
     dismissingPress ||
-    event.target.closest("button, #timeline, #stats-panel")
+    event.target.closest("button, #timeline, #stats-panel, #archive-panel")
   ) {
     touchStart = null;
     return;
@@ -1548,6 +2172,34 @@ onPress(elements.timeTravel, () => {
   }
 });
 onPress(elements.graph, () => setStatsOpen(elements.statsPanel.hidden));
+onPress(elements.pastGames, () => setArchiveOpen(elements.archivePanel.hidden));
+
+// One listener on the list rather than one per row: the rows are rebuilt on every paint,
+// and a row is only ever a button when its game has moves to open.
+elements.archiveList.addEventListener("click", (event) => {
+  const row = event.target instanceof Element ? event.target.closest(".archive-row") : null;
+  if (row === null || row.dataset.id === undefined) {
+    return;
+  }
+  // A second press on the open row closes it, which is how every other control in this
+  // panel's neighbourhood behaves.
+  if (openedGame === row.dataset.id) {
+    closeArchivedGame();
+    paintArchive();
+    return;
+  }
+  openArchivedGame(row.dataset.id);
+  paintArchive();
+});
+
+elements.archiveTracks.addEventListener("click", (event) => {
+  const button = event.target instanceof Element ? event.target.closest("button") : null;
+  if (button === null || button.dataset.track === archiveTrack) {
+    return;
+  }
+  archiveTrack = button.dataset.track;
+  paintArchive();
+});
 
 // Pointing at a bin reads it out, and taking the pointer away puts the whole game back.
 // A repaint per bin crossed, which is what the band under the pointer costs; the graph
@@ -1597,6 +2249,15 @@ document.addEventListener("pointerdown", (event) => {
   // control, so a press anywhere outside it is a press meant for the game.
   if (!elements.statsPanel.hidden && target?.closest("#stats-panel, #graph") === null) {
     setStatsOpen(false);
+    dismissed = true;
+  }
+  // The list of past games goes the same way, and for the same reason as the graph: its
+  // rows are controls, but a press outside them is a press meant for the game.
+  if (
+    !elements.archivePanel.hidden &&
+    target?.closest("#archive-panel, #past-games") === null
+  ) {
+    setArchiveOpen(false);
     dismissed = true;
   }
   // The question goes the same way, and this is also what keeps it from ever being up
@@ -1862,6 +2523,11 @@ function restoreGame() {
     replayedBest: game.replayedBest,
   });
   game.restore(saved);
+  // A save from a build that did not keep one gets an id now rather than going without:
+  // it names a game that is still being played, and the archive will want to file it
+  // under something when it ends.
+  currentGameId = storage.getItem(CURRENT_GAME_KEY) ?? newGameId();
+  storage.setItem(CURRENT_GAME_KEY, currentGameId);
   // The restore can raise a best tile -- off a save written before tiles were tracked at
   // all, whose stored figure is a zero the boards disprove -- and the next thing the
   // player does may be to start a new game, which discards the only board that proved
@@ -1874,6 +2540,9 @@ function restoreGame() {
 
 /** Restore or begin a game. False means startup stalled on a corrupt save. */
 function start() {
+  // Before either branch: startNewGame files the game it is replacing, and it has to be
+  // filed into the list as it actually stands rather than into an empty one.
+  loadArchive();
   let restored;
   try {
     restored = restoreGame();
@@ -1886,6 +2555,14 @@ function start() {
   }
 
   if (restored) {
+    // A finished game that was never filed: the board locked, and the page went away
+    // between the row being written and the reload -- or the save predates the archive
+    // entirely, which is every game anyone had already finished when this shipped. Filing
+    // it is idempotent, so asking on every restore costs a comparison and closes the gap
+    // without anything having to remember whether it was filed.
+    if (game.latest.gameOver) {
+      archiveGame();
+    }
     // At rest, unlike a state scrubbed to: reopening a save is not a move arriving,
     // however far back the state it opens on sits.
     //
@@ -1949,6 +2626,13 @@ compactMedia.addEventListener("change", () => {
 new ResizeObserver(() => {
   resizeBoard();
   paintChart();
+  // The archived graph is drawn once when its row is opened rather than on every move,
+  // so a resize is the one thing that can leave it stretched across a backing store the
+  // wrong size. Redrawing it needs the game rebuilt again, which is why this asks
+  // whether one is open rather than doing it unconditionally.
+  if (openedGame !== null) {
+    openArchivedGame(openedGame);
+  }
 }).observe(elements.main);
 
 // Only now is there a game to receive input, so a corrupt save leaves input off while
