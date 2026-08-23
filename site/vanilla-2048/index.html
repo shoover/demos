@@ -751,6 +751,21 @@
     #archive-trend[hidden] { display: none; }
     #archive-trend-readout:empty { display: none; }
 
+    /* The game on the board, sitting above the games that are over. Ruled off from them
+       rather than tinted: it is a different kind of row -- provisional, and the only one
+       in the list that is still changing -- and the rule says that in the one place the
+       eye is already travelling, which is the gap between it and the header below. */
+    .archive-row.playing {
+      border-bottom: 1px solid rgba(255, 255, 255, 0.14);
+      border-radius: 0;
+      padding-bottom: 5px;
+      margin-bottom: 3px;
+    }
+
+    /* Named rather than dated, so it reads as a label and not as a timestamp that
+       happens to say something odd. */
+    .archive-row.playing .archive-when { color: #9fb3c8; }
+
     /* A game thrown away before the board ran out. Set in the label grey rather than
        marked with a glyph, for the reason archiveRow gives. */
     .archive-score.discarded { color: #9fb3c8; }
