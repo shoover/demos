@@ -76,6 +76,7 @@ function requireWholeNumber(value, name) {
  */
 export function summarize({
   id,
+  startedAt = null,
   endedAt,
   ending,
   score,
@@ -95,6 +96,11 @@ export function summarize({
   return {
     id,
     at: requireWholeNumber(endedAt, "end time"),
+    // When the first move was played, or null for a game finished before this was
+    // recorded. Kept beside the end time rather than replacing it, because the two
+    // answer different questions and only one of them can be missing: every row has an
+    // end time -- it is the moment the row was written -- and the list is ordered by it.
+    st: startedAt === null ? null : requireWholeNumber(startedAt, "start time"),
     end: ending,
     score: requireWholeNumber(score, "score"),
     tile: requireWholeNumber(topTile, "top tile"),
@@ -158,6 +164,7 @@ export function decodeArchive(serialized) {
   return stored.games.map((row) =>
     summarize({
       id: row.id,
+      startedAt: row.st ?? null,
       endedAt: row.at,
       ending: row.end,
       score: row.score,

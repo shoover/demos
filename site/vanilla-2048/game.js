@@ -237,6 +237,11 @@ const ARCHIVE_KEY = "vanilla-2048.archive.v1";
 // inside it for the reason the best scores are: it is bookkeeping about the game, not
 // part of the board, and board.js has no business knowing this list exists.
 const CURRENT_GAME_KEY = "vanilla-2048.currentGame";
+// When the game in GAME_STATE_KEY was first played, beside the id that names it. Its own
+// key rather than a field inside the save, for the same reason the id is: it is
+// bookkeeping about the game rather than part of the board, and board.js has no business
+// knowing this list exists.
+const CURRENT_GAME_STARTED_KEY = "vanilla-2048.currentGameStarted";
 const LOG_DB_NAME = "vanilla-2048";
 const LOG_DB_VERSION = 1;
 const LOG_STORE = "spawns";
@@ -250,6 +255,40 @@ let archiveFault = null;
 
 /** The id of the game being played, which the archive files its row under. */
 let currentGameId = null;
+
+/**
+ * When the game being played was first moved, or null before its first move.
+ *
+ * The first move rather than the moment the board was dealt, which is the same question
+ * the play clock answers and is answered the same way: a board sitting untouched is not a
+ * game under way. Opening the page at midnight and playing at eight would otherwise file
+ * a game that started at midnight and took eight minutes.
+ *
+ * Set once per game and never moved. A take-back can walk a game back to its first move
+ * again, and that does not make it a new game or a later one.
+ */
+let currentGameStarted = null;
+
+/** Note the first move of a game, so the archive can say when it began. */
+function markGameStarted() {
+  if (currentGameStarted !== null) {
+    return;
+  }
+  currentGameStarted = Date.now();
+  storage.setItem(CURRENT_GAME_STARTED_KEY, String(currentGameStarted));
+}
+
+/** The stored start time of the game in progress, or null where there is none. */
+function loadGameStarted() {
+  const value = storage.getItem(CURRENT_GAME_STARTED_KEY);
+  if (value === null) {
+    return null;
+  }
+  // A stored figure that is not a time is not a time to guess at: the game keeps playing
+  // and its row says it does not know when it began, which is what a game finished
+  // before this was recorded says too.
+  return /^\d+$/.test(value) && Number.isSafeInteger(Number(value)) ? Number(value) : null;
+}
 
 // Enough to tell a thousand games apart in one browser, which is the whole job: the id
 // is a key into two local stores and is never seen by anyone. crypto.randomUUID would do
@@ -401,6 +440,7 @@ function archiveGame() {
   }
   const row = summarize({
     id: currentGameId,
+    startedAt: currentGameStarted,
     endedAt: Date.now(),
     ending: latest.gameOver ? ENDED_GAME_OVER : ENDED_DISCARDED,
     score: latest.score,
@@ -1303,7 +1343,20 @@ let openedGame = null;
 // it is the live graph's own line, printed by the same function.
 const FIELD = " | ";
 
-/** A stored game's end time, at the width a list of them can be scanned down. */
+/**
+ * When a game began, at the width a list of them can be scanned down -- or a dash where
+ * it is not known.
+ *
+ * A dash rather than a guess. The end time and the play clock are both on the row, and
+ * subtracting one from the other looks like it would give the start, but the clock stops
+ * with the tab: a game played over a lunch break would claim to have begun minutes
+ * before it ended. So a game finished before start times were recorded says it does not
+ * know, in the same en dash a tile no track ever landed is written with, and the column
+ * heals as games are played.
+ */
+const formatStarted = (row) => (row.st === null ? "\u2013" : formatWhen(row.st));
+
+/** A stored moment, at the width a list of them can be scanned down. */
 function formatWhen(at) {
   const when = new Date(at);
   const date = when.toLocaleDateString("en-US", { month: "short", day: "numeric" });
@@ -1430,7 +1483,7 @@ function archiveRow(row) {
     score.append(note);
   }
   element.append(
-    cell(formatWhen(row.at), "archive-when"),
+    cell(formatStarted(row), "archive-when"),
     score,
     cell(count(row.moves), "archive-moves"),
     cell(formatDuration(row.secs), "archive-secs"),
@@ -1498,7 +1551,7 @@ function trendReadout(trend) {
   // The same pair the score line prints, in the same notation: a score and the tile it
   // was reached on, with the asterisk a replayed game carries everywhere else.
   return (
-    `${formatWhen(game.at)}${FIELD}` +
+    `${formatStarted(game)}${FIELD}` +
     `${abbreviate(game.score)}·${game.tile === 0 ? "–" : game.tile}` +
     `${isClean(game) ? "" : "*"}${FIELD}${count(game.moves)} moves` +
     `${FIELD}${formatDuration(game.secs)}`
@@ -1629,6 +1682,12 @@ function drawTrend(canvas, trend) {
 
   // The axis is games rather than a measure, so its ends are named by when they were
   // played -- which is the one thing about a game that puts it in order.
+  //
+  // By when each left the list rather than by when it began, which is what the rows show.
+  // The two agree for anyone playing one game at a time, and only one of them is on every
+  // row: a game finished before start times were recorded has none, and an axis is no
+  // place for a dash. The axis is also what the list is ordered by, so labelling it with
+  // that is labelling it with the thing it is actually sorted on.
   label(formatWhen(trend.games[0].at), plotLeft, plotBottom + CHART_PAD_BOTTOM / 2 + 2, "left");
   if (trend.games.length > 1) {
     label(
@@ -1715,7 +1774,7 @@ function paintArchive() {
   header.className = "archive-row archive-head";
   header.setAttribute("aria-hidden", "true");
   for (const [text, className] of [
-    ["Ended", "archive-when"],
+    ["Started", "archive-when"],
     ["Score", "archive-score"],
     ["Moves", "archive-moves"],
     ["Time", "archive-secs"],
@@ -1760,7 +1819,7 @@ async function openArchivedGame(id) {
   }
   openedGame = id;
   elements.archiveGame.hidden = false;
-  elements.archiveGameTitle.textContent = `${formatWhen(row.at)}${FIELD}rebuilding…`;
+  elements.archiveGameTitle.textContent = `${formatStarted(row)}${FIELD}rebuilding…`;
   elements.archiveReadout.textContent = "";
 
   const record = await readGameRecord(id);
@@ -1774,7 +1833,7 @@ async function openArchivedGame(id) {
     // shape of a store this browser refuses -- a private window, a sandboxed frame --
     // and it is worth saying plainly rather than leaving an empty frame.
     elements.archiveGameTitle.textContent =
-      `${formatWhen(row.at)}${FIELD}moves unavailable`;
+      `${formatStarted(row)}${FIELD}moves unavailable`;
     elements.archiveReadout.textContent =
       "This browser is not keeping move records. The figures above are unaffected.";
     elements.archiveChart.hidden = true;
@@ -1788,7 +1847,7 @@ async function openArchivedGame(id) {
     if (!(error instanceof SaveError)) {
       throw error;
     }
-    elements.archiveGameTitle.textContent = `${formatWhen(row.at)}${FIELD}record unusable`;
+    elements.archiveGameTitle.textContent = `${formatStarted(row)}${FIELD}record unusable`;
     elements.archiveReadout.textContent = error.message;
     elements.archiveChart.hidden = true;
     return;
@@ -1807,7 +1866,7 @@ async function openArchivedGame(id) {
   // Agreement is the ordinary case and reads as a plain restatement of the row.
   const agrees = rebuilt.latest.score === row.score && rebuilt.latest.moves === row.moves;
   elements.archiveGameTitle.textContent =
-    `${formatWhen(row.at)}${FIELD}${count(rebuilt.latest.moves)} moves rebuilt from ` +
+    `${formatStarted(row)}${FIELD}${count(rebuilt.latest.moves)} moves rebuilt from ` +
     `${count(record.spawns.length)} bytes` +
     (agrees ? "" : `${FIELD}does not match the archived row`);
   elements.archiveReadout.textContent = chartReadout(stats, null);
@@ -2068,6 +2127,10 @@ function startNewGame() {
   archiveGame();
   currentGameId = newGameId();
   storage.setItem(CURRENT_GAME_KEY, currentGameId);
+  // Cleared rather than set: this game has not been played yet, and markGameStarted
+  // stamps it on the move that changes that.
+  currentGameStarted = null;
+  storage.removeItem(CURRENT_GAME_STARTED_KEY);
   const spawned = game.reset();
   slide = null;
   lastMoveAt = -Infinity;
@@ -2156,6 +2219,7 @@ function applyMove(direction) {
   }
 
   lastMoveAt = now;
+  markGameStarted();
   landSlide();
   startSlide(paintSliding(result.slidingTiles), () =>
     paintSettled({
@@ -2779,6 +2843,7 @@ function restoreGame() {
   // under something when it ends.
   currentGameId = storage.getItem(CURRENT_GAME_KEY) ?? newGameId();
   storage.setItem(CURRENT_GAME_KEY, currentGameId);
+  currentGameStarted = loadGameStarted();
   // The restore can raise a best tile -- off a save written before tiles were tracked at
   // all, whose stored figure is a zero the boards disprove -- and the next thing the
   // player does may be to start a new game, which discards the only board that proved

@@ -195,6 +195,27 @@ test("milestones nest, because a game that reached 2048 reached 1024", () => {
   );
 });
 
+test("a row carries when the game began, and null when that was never recorded", () => {
+  assert.equal(game({ startedAt: 1_699_999_000_000 }).st, 1_699_999_000_000);
+  // Every game finished before start times were recorded. The list says it does not know
+  // rather than subtracting the play clock from the end time, which stops with the tab
+  // and would claim a game played over a lunch break began minutes before it ended.
+  assert.equal(game().st, null);
+});
+
+test("a start time round-trips, and a row without one stays without one", () => {
+  const rows = [game({ id: "a", startedAt: 1_699_999_000_000 }), game({ id: "b" })];
+  const back = decodeArchive(encodeArchive(rows));
+  assert.deepEqual(back, rows);
+  assert.equal(back[0].st, 1_699_999_000_000);
+  assert.equal(back[1].st, null);
+});
+
+test("a start time that is not a time is rejected", () => {
+  assert.throws(() => game({ startedAt: -1 }), ArchiveError);
+  assert.throws(() => game({ startedAt: 1.5 }), ArchiveError);
+});
+
 test("a game whose moves were kept says so", () => {
   assert.equal(game({ recorded: true }).rec, true);
   assert.equal(game().rec, false);
