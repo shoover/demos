@@ -252,6 +252,51 @@ export function archiveStats(rows) {
  * or above each tile and they nest -- which is what makes the column read down as a
  * funnel rather than as a histogram whose bars do not add up to anything.
  */
+// Games on the trend chart. Enough that a run of them has a shape -- a stretch of even
+// games, a week where the scores climbed -- and few enough that each still gets a bar
+// wide enough to point at: fifty across the panel is about seven pixels a game.
+export const TREND_GAMES = 50;
+
+/**
+ * The last `limit` games, oldest first, with the scales the trend chart is drawn against.
+ *
+ * Oldest first, which is the one place in this module that does not read newest first:
+ * the list is scanned down from the most recent game, but a chart is read left to right
+ * as time passing, and a chart of games that ran backwards would be misread by everyone
+ * who has ever seen a chart.
+ *
+ * Two scales, because the two series are not the same kind of number. A score is a count
+ * and is measured from zero -- a game worth half as much draws half as tall, and that
+ * comparison is the whole reason to put scores side by side. A tile is a *level*: they
+ * are powers of two, a game reaching 512 is one step past 256 rather than twice it, and
+ * the steps are what a player thinks in. So the tile lane is scaled between the lowest
+ * and highest tile actually reached rather than from zero, and it is scaled in exponents
+ * -- which is what puts those steps an even distance apart and lets a lane a few dozen
+ * pixels tall show the difference between a run of 256s and the game that broke 512.
+ *
+ * A game whose tile was never recorded carries zero, which is not a level and is not
+ * plotted. It still has a score, so it keeps its bar: the two lanes are two questions
+ * about a game, and having no answer to one is not having no answer to the other.
+ */
+export function gameTrend(rows, limit = TREND_GAMES) {
+  if (!Number.isSafeInteger(limit) || limit < 1) {
+    throw new ArchiveError(`Invalid 2048 trend length: ${limit}`);
+  }
+  const games = rows.slice(0, limit).reverse();
+  const tiles = games.map((row) => row.tile).filter((tile) => tile > 0);
+  return {
+    games,
+    maxScore: games.length === 0 ? 0 : Math.max(...games.map((row) => row.score)),
+    // Exponents rather than the tiles themselves, since that is the axis the lane is
+    // drawn on. A window in which every game reached the same tile has no range at all,
+    // and says so with a pair that is equal rather than with a zero span the drawing
+    // would have to divide by.
+    minTileExponent: tiles.length === 0 ? 0 : Math.log2(Math.min(...tiles)),
+    maxTileExponent: tiles.length === 0 ? 0 : Math.log2(Math.max(...tiles)),
+    tiled: tiles.length,
+  };
+}
+
 export const MILESTONE_TILES = [2048, 1024, 512, 256, 128];
 
 export function milestones(rows) {

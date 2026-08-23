@@ -10,10 +10,12 @@ import {
   ArchiveError,
   ENDED_DISCARDED,
   ENDED_GAME_OVER,
+  TREND_GAMES,
   addGame,
   archiveStats,
   decodeArchive,
   encodeArchive,
+  gameTrend,
   isClean,
   milestones,
   summarize,
@@ -113,6 +115,8 @@ const elements = {
   archivePlayed: document.getElementById("archive-played"),
   archiveScored: document.getElementById("archive-scored"),
   archiveReached: document.getElementById("archive-reached"),
+  archiveTrend: document.getElementById("archive-trend"),
+  archiveTrendReadout: document.getElementById("archive-trend-readout"),
   archiveList: document.getElementById("archive-list"),
   archiveGame: document.getElementById("archive-game"),
   archiveGameTitle: document.getElementById("archive-game-title"),
@@ -1043,7 +1047,14 @@ function chartReadout(stats, hovered) {
  * Returns the geometry the paint used, which is what turns a pointer position into the
  * bin under it. Only the live graph has a use for it; the archived one is not hovered.
  */
-function drawChart(canvas, stats, hovered) {
+/**
+ * A canvas cleared and ready to draw on, in CSS pixels, at the display's own resolution.
+ *
+ * Shared by both graphs in the panel, which are different pictures with identical
+ * plumbing: measure the element, size the backing store to the device, scale the context
+ * so everything above this can be written in the units the stylesheet is in.
+ */
+function chartContext(canvas) {
   const width = canvas.clientWidth;
   const height = canvas.clientHeight;
   // The backing store is the display's pixels, and is resized only when it has to be:
@@ -1059,6 +1070,20 @@ function drawChart(canvas, stats, hovered) {
   // drawn in CSS pixels and lands on the display's own.
   context.setTransform(ratio, 0, 0, ratio, 0, 0);
   context.clearRect(0, 0, width, height);
+  return { context, width, height };
+}
+
+/** Write one of a graph's labels, in the panel's own face. */
+function chartLabel(context, text, x, y, align) {
+  context.fillStyle = CHART_LABEL_COLOR;
+  context.font = `${CHART_LABEL_SIZE}px ${getComputedStyle(elements.panel).fontFamily}`;
+  context.textAlign = align;
+  context.textBaseline = "middle";
+  context.fillText(text, x, y);
+}
+
+function drawChart(canvas, stats, hovered) {
+  const { context, width, height } = chartContext(canvas);
 
   const plotLeft = CHART_GUTTER;
   const plotRight = width - CHART_PAD_RIGHT;
@@ -1096,14 +1121,7 @@ function drawChart(canvas, stats, hovered) {
   const pointsAt = (points) =>
     lanes.points.bottom - heightIn(lanes.points, points, stats.maxPoints);
 
-  const font = getComputedStyle(elements.panel).fontFamily;
-  const label = (text, x, y, align) => {
-    context.fillStyle = CHART_LABEL_COLOR;
-    context.font = `${CHART_LABEL_SIZE}px ${font}`;
-    context.textAlign = align;
-    context.textBaseline = "middle";
-    context.fillText(text, x, y);
-  };
+  const label = (text, x, y, align) => chartLabel(context, text, x, y, align);
 
   // The bin being pointed at, behind everything: a band rather than a crosshair, since
   // what is being read off it is a span of moves and not a single one.
@@ -1421,6 +1439,205 @@ function archiveRow(row) {
   return element;
 }
 
+/* The trend graph ----------------------------------------------------------- */
+
+// The two lanes, top to bottom. The scores take the larger share: they are the series
+// with a range worth drawing, while the tiles take a dozen values and are legible in a
+// band. Same split of the plot the per-game graph uses, one lane fewer.
+const TREND_LANES = { score: 0.62, tile: 0.38 };
+// A tile mark is a dash rather than a bar, so its lane reads as a scatter of levels
+// reached rather than as a second row of bars saying the same thing as the first.
+const TREND_TILE_MARK = 2;
+// The widest a single game's mark is allowed to get, as a share of the plot.
+//
+// Without a cap a mark is simply the slot it sits in, which is the whole plot when there
+// is one game in the window -- and a bar as wide as the graph does not read as one game
+// among others, it reads as a fill. The cap only binds under about four games; past that
+// the slots are already narrower than this and nothing here changes.
+//
+// The per-game graph is deliberately left uncapped. Its axis is moves, so a wide bar
+// there means a bin covering a wide span of them, which is true and worth seeing. This
+// axis is games, where width means nothing at all.
+const TREND_MAX_MARK = 0.25;
+// Which game the pointer is over on the trend graph, and the geometry that paint used.
+// Kept apart from the per-game graph's own pair rather than shared: the two are open at
+// once, over different axes, and a pointer in one says nothing about the other.
+let hoveredGame = null;
+let trendGeometry = null;
+
+/** The game under a canvas x on the trend graph, or null outside the plot. */
+function gameAt(x) {
+  if (trendGeometry === null) {
+    return null;
+  }
+  const { plotLeft, gamePixels, count: games } = trendGeometry;
+  const index = Math.floor((x - plotLeft) / gamePixels);
+  return index < 0 || index >= games ? null : index;
+}
+
+/**
+ * The trend graph in words: the window as a whole, or the game being pointed at.
+ *
+ * Both readings name their span first, the way the per-game graph's do, so pointing at a
+ * game swaps one sentence for another of the same shape rather than adding one.
+ */
+function trendReadout(trend) {
+  if (trend.games.length === 0) {
+    return "";
+  }
+  const game = hoveredGame === null ? null : trend.games[hoveredGame];
+  if (game === null) {
+    const first = formatWhen(trend.games[0].at);
+    const last = formatWhen(trend.games[trend.games.length - 1].at);
+    return (
+      `Last ${count(trend.games.length)} ${trend.games.length === 1 ? "game" : "games"}` +
+      `${FIELD}${first} to ${last}` +
+      `${FIELD}best ${abbreviate(trend.maxScore)}`
+    );
+  }
+  // The same pair the score line prints, in the same notation: a score and the tile it
+  // was reached on, with the asterisk a replayed game carries everywhere else.
+  return (
+    `${formatWhen(game.at)}${FIELD}` +
+    `${abbreviate(game.score)}·${game.tile === 0 ? "–" : game.tile}` +
+    `${isClean(game) ? "" : "*"}${FIELD}${count(game.moves)} moves` +
+    `${FIELD}${formatDuration(game.secs)}`
+  );
+}
+
+/**
+ * Draw the last games against each other: what each was worth, and how far each got.
+ *
+ * Two lanes rather than two scales on one axis, for the reason the per-game graph gives
+ * at length: the series are measured in different units, and whichever one is squeezed to
+ * fit looks like it crosses the other.
+ *
+ * The lanes are scaled differently on purpose, and it is the whole of what makes this
+ * readable. Scores are counted from zero, because a bar twice as tall meaning twice the
+ * points is the comparison the lane exists for. Tiles are not counted at all -- they are
+ * levels, they double, and drawing them from zero on a linear axis would crush every
+ * game into the bottom of the lane and leave the one that reached 2048 alone at the top.
+ * So the tile lane is drawn in exponents, between the lowest and highest tile the window
+ * actually holds, and both ends are labelled with the tile rather than the exponent so
+ * nothing has to be read as a logarithm to be understood.
+ *
+ * Colours come off the legend swatches, the way the per-game graph's do: the stylesheet
+ * stays the one place a colour is chosen.
+ */
+function drawTrend(canvas, trend) {
+  const { context, width, height } = chartContext(canvas);
+  if (trend.games.length === 0) {
+    trendGeometry = null;
+    return;
+  }
+
+  const plotLeft = CHART_GUTTER;
+  const plotRight = width - CHART_PAD_RIGHT;
+  const plotBottom = height - CHART_PAD_BOTTOM;
+  const gamePixels = (plotRight - plotLeft) / trend.games.length;
+  trendGeometry = { plotLeft, gamePixels, count: trend.games.length };
+
+  const names = Object.keys(TREND_LANES);
+  const laneRoom = plotBottom - CHART_PAD_TOP - CHART_LANE_GAP * (names.length - 1);
+  const lanes = {};
+  let laneTop = CHART_PAD_TOP;
+  for (const [index, name] of names.entries()) {
+    // The last lane is measured from the bottom rather than given its share, so the
+    // rounding the one above leaves over lands inside it instead of pushing its baseline
+    // out from under the axis labels.
+    const bottom =
+      index === names.length - 1
+        ? plotBottom
+        : laneTop + Math.round(laneRoom * TREND_LANES[name]);
+    lanes[name] = { top: laneTop, bottom, height: bottom - laneTop };
+    laneTop = bottom + CHART_LANE_GAP;
+  }
+
+  const centre = (index) => plotLeft + (index + 0.5) * gamePixels;
+  const label = (text, x, y, align) => chartLabel(context, text, x, y, align);
+  const headroom = (lane) => lane.height - CHART_LABEL_SIZE / 2;
+
+  if (hoveredGame !== null) {
+    context.fillStyle = CHART_HOVER_COLOR;
+    context.fillRect(
+      plotLeft + hoveredGame * gamePixels, CHART_PAD_TOP, gamePixels, plotBottom - CHART_PAD_TOP
+    );
+  }
+
+  context.fillStyle = CHART_AXIS_COLOR;
+  for (const lane of Object.values(lanes)) {
+    context.fillRect(plotLeft, lane.bottom, plotRight - plotLeft, 1);
+  }
+
+  // The scores, from zero, one bar a game.
+  const barWidth = Math.max(
+    CHART_MIN_MARK,
+    Math.min(gamePixels - CHART_BAR_GAP, (plotRight - plotLeft) * TREND_MAX_MARK)
+  );
+  context.fillStyle = paintedColor("swatch score");
+  for (const [index, game] of trend.games.entries()) {
+    if (game.score === 0 || trend.maxScore === 0) {
+      continue;
+    }
+    const barHeight = Math.max(
+      CHART_MIN_MARK, (game.score / trend.maxScore) * headroom(lanes.score)
+    );
+    const radius = Math.min(CHART_BAR_RADIUS, barWidth / 2, barHeight / 2);
+    context.beginPath();
+    context.roundRect(
+      centre(index) - barWidth / 2, lanes.score.bottom - barHeight, barWidth, barHeight,
+      [radius, radius, 0, 0]
+    );
+    context.fill();
+  }
+  if (trend.maxScore > 0) {
+    label(abbreviate(trend.maxScore), plotLeft - 6, lanes.score.top + CHART_LABEL_SIZE / 2, "right");
+  }
+
+  // The tiles, as levels: a dash a game, between the lowest and highest reached. A window
+  // where every game reached the same tile has no range to spread across, so its dashes
+  // sit on the lane's own middle rather than being divided by a span of nothing.
+  const span = trend.maxTileExponent - trend.minTileExponent;
+  const tileAt = (tile) => {
+    const room = headroom(lanes.tile);
+    if (span === 0) {
+      return lanes.tile.bottom - room / 2;
+    }
+    return lanes.tile.bottom - ((Math.log2(tile) - trend.minTileExponent) / span) * room;
+  };
+  context.fillStyle = paintedColor("swatch tile");
+  for (const [index, game] of trend.games.entries()) {
+    if (game.tile === 0) {
+      continue;
+    }
+    context.fillRect(
+      centre(index) - barWidth / 2, tileAt(game.tile) - TREND_TILE_MARK / 2,
+      barWidth, TREND_TILE_MARK
+    );
+  }
+  // Both ends named, and named as tiles: the lane is drawn in exponents and nobody reads
+  // in exponents. A window with one tile in it says so once rather than labelling a range
+  // it does not have.
+  if (trend.tiled > 0) {
+    const highest = 2 ** trend.maxTileExponent;
+    label(String(highest), plotLeft - 6, tileAt(highest), "right");
+    if (span > 0) {
+      const lowest = 2 ** trend.minTileExponent;
+      label(String(lowest), plotLeft - 6, tileAt(lowest), "right");
+    }
+  }
+
+  // The axis is games rather than a measure, so its ends are named by when they were
+  // played -- which is the one thing about a game that puts it in order.
+  label(formatWhen(trend.games[0].at), plotLeft, plotBottom + CHART_PAD_BOTTOM / 2 + 2, "left");
+  if (trend.games.length > 1) {
+    label(
+      formatWhen(trend.games[trend.games.length - 1].at),
+      plotRight, plotBottom + CHART_PAD_BOTTOM / 2 + 2, "right"
+    );
+  }
+}
+
 /**
  * Paint the list of finished games and the figures over them.
  *
@@ -1453,6 +1670,8 @@ function paintArchive() {
       paintArchive();
     });
     elements.archiveList.replaceChildren(clear);
+    elements.archiveTrend.hidden = true;
+    elements.archiveTrendReadout.textContent = "";
     elements.archiveGame.hidden = true;
     return;
   }
@@ -1474,9 +1693,23 @@ function paintArchive() {
         ? "No finished games yet. A game joins this list when it ends or is discarded."
         : `No ${archiveTrack} games yet.`;
     elements.archiveList.replaceChildren(nothing);
+    elements.archiveTrend.hidden = true;
+    elements.archiveTrendReadout.textContent = "";
     elements.archiveGame.hidden = true;
     return;
   }
+
+  // The same rows the figures above are computed over, so the graph and the lines agree
+  // about which games are being talked about -- capped at the newest TREND_GAMES.
+  const trend = gameTrend(rows);
+  // The game under the pointer need not have survived the track being switched, or a new
+  // game arriving and pushing the oldest out of the window.
+  if (hoveredGame !== null && hoveredGame >= trend.games.length) {
+    hoveredGame = null;
+  }
+  elements.archiveTrend.hidden = false;
+  drawTrend(elements.archiveTrend, trend);
+  elements.archiveTrendReadout.textContent = trendReadout(trend);
 
   const header = document.createElement("div");
   header.className = "archive-row archive-head";
@@ -1600,6 +1833,8 @@ function setArchiveOpen(open) {
   if (!open) {
     closeArchivedGame();
   }
+  // Whatever was under the pointer belonged to the last time it was open.
+  hoveredGame = null;
   syncPlayState();
   paintArchive();
 }
@@ -2190,6 +2425,22 @@ elements.archiveList.addEventListener("click", (event) => {
   }
   openArchivedGame(row.dataset.id);
   paintArchive();
+});
+
+// Pointing at a game reads it out, and taking the pointer away puts the window back --
+// the same interaction the per-game graph's bins have, over a different axis.
+elements.archiveTrend.addEventListener("pointermove", (event) => {
+  const game = gameAt(event.offsetX);
+  if (game !== hoveredGame) {
+    hoveredGame = game;
+    paintArchive();
+  }
+});
+elements.archiveTrend.addEventListener("pointerleave", () => {
+  if (hoveredGame !== null) {
+    hoveredGame = null;
+    paintArchive();
+  }
 });
 
 elements.archiveTracks.addEventListener("click", (event) => {

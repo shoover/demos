@@ -14,10 +14,12 @@ import {
   ArchiveError,
   ENDED_DISCARDED,
   ENDED_GAME_OVER,
+  TREND_GAMES,
   addGame,
   archiveStats,
   decodeArchive,
   encodeArchive,
+  gameTrend,
   isClean,
   milestones,
   summarize,
@@ -197,4 +199,90 @@ test("a game whose moves were kept says so", () => {
   assert.equal(game({ recorded: true }).rec, true);
   assert.equal(game().rec, false);
   assert.equal(archiveStats([game({ recorded: true }), game({ id: "b" })]).recorded, 1);
+});
+
+/* The trend window ----------------------------------------------------------- */
+
+test("the trend runs oldest first, which is the way a chart is read", () => {
+  // The archive is newest first, because that is how a list is scanned. A chart is read
+  // left to right as time passing, so this is the one place the order turns around.
+  const rows = [game({ id: "new", score: 300 }), game({ id: "mid", score: 200 }), game({ id: "old", score: 100 })];
+  assert.deepEqual(gameTrend(rows).games.map((row) => row.id), ["old", "mid", "new"]);
+});
+
+test("the trend keeps the newest games and drops the rest", () => {
+  const rows = Array.from({ length: 80 }, (unused, index) =>
+    game({ id: `g${index}`, score: index })
+  );
+  const trend = gameTrend(rows, 50);
+  assert.equal(trend.games.length, 50);
+  // Newest fifty of an archive that is newest first: rows 0..49, turned around.
+  assert.equal(trend.games[0].id, "g49");
+  assert.equal(trend.games[49].id, "g0");
+});
+
+test("the trend takes every game when there are fewer than it holds", () => {
+  const rows = [game({ id: "a" }), game({ id: "b" })];
+  assert.equal(gameTrend(rows, TREND_GAMES).games.length, 2);
+});
+
+test("the score scale is the highest score in the window", () => {
+  const rows = [1000, 4000, 2000].map((score, index) => game({ id: `g${index}`, score }));
+  assert.equal(gameTrend(rows).maxScore, 4000);
+});
+
+test("the tile scale is the range of tiles reached, in exponents", () => {
+  // Drawn in exponents because tiles double: 512 is one step past 256, not twice it, and
+  // an even spacing is what lets a short lane show the difference.
+  const rows = [128, 512, 256].map((tile, index) => game({ id: `g${index}`, topTile: tile }));
+  const trend = gameTrend(rows);
+  assert.equal(trend.minTileExponent, 7);
+  assert.equal(trend.maxTileExponent, 9);
+  assert.equal(trend.tiled, 3);
+});
+
+test("a window where every game reached the same tile has no range", () => {
+  // The lane has nothing to spread across, and says so with an equal pair rather than a
+  // span of zero the drawing would divide by.
+  const rows = [game({ id: "a", topTile: 256 }), game({ id: "b", topTile: 256 })];
+  const trend = gameTrend(rows);
+  assert.equal(trend.minTileExponent, trend.maxTileExponent);
+  assert.equal(trend.maxTileExponent, 8);
+});
+
+test("a game with no tile on record is left out of the tile scale but keeps its score", () => {
+  // Games archived before tiles were tracked. They still have a score, so they still
+  // have a bar; having no answer to one question is not having no answer to the other.
+  const rows = [
+    game({ id: "a", topTile: 0, score: 900 }),
+    game({ id: "b", topTile: 256, score: 400 }),
+  ];
+  const trend = gameTrend(rows);
+  assert.equal(trend.tiled, 1);
+  assert.equal(trend.minTileExponent, 8);
+  assert.equal(trend.maxTileExponent, 8);
+  // The untiled game is still the tallest bar in the score lane.
+  assert.equal(trend.maxScore, 900);
+  assert.equal(trend.games.length, 2);
+});
+
+test("a trend over no games has scales rather than errors", () => {
+  // Asked for on a track with nothing in it yet, so it has to come back as zeroes.
+  const trend = gameTrend([]);
+  assert.deepEqual(trend.games, []);
+  assert.equal(trend.maxScore, 0);
+  assert.equal(trend.tiled, 0);
+  assert.equal(trend.maxTileExponent, 0);
+});
+
+test("a trend length that cannot be drawn to is refused", () => {
+  assert.throws(() => gameTrend([game()], 0), ArchiveError);
+  assert.throws(() => gameTrend([game()], 2.5), ArchiveError);
+});
+
+test("the trend does not disturb the archive it reads", () => {
+  // It reverses, and reverse() is in place on the array it is called on.
+  const rows = [game({ id: "a" }), game({ id: "b" })];
+  gameTrend(rows);
+  assert.deepEqual(rows.map((row) => row.id), ["a", "b"]);
 });

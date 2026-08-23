@@ -46,6 +46,12 @@
       --series-points: #3987e5;
       --series-gained: #35a06a;
       --series-undos: #d95926;
+      /* The trend graph's second series: the largest tile a game reached. Its own hue
+         rather than a reuse of one above, because it is read in the same panel as those
+         and beside them a shared colour would say the two series were the same thing.
+         Stepped for the popup's ground like the others, and distinguishable from the
+         blue it is stacked under at every kind of colour blindness. */
+      --series-tile: #b07cd8;
     }
 
     html, body {
@@ -533,6 +539,11 @@
     .swatch.points { height: 2px; background: var(--series-points); }
     .swatch.gained { height: 8px; background: var(--series-gained); }
     .swatch.undos { height: 8px; background: var(--series-undos); }
+    /* The trend graph's pair. Score takes the points colour, because it is the same
+       quantity that graph's line is drawing -- but a bar's weight, because that is how
+       this one draws it. The tile is a thin dash and its swatch is one. */
+    .swatch.score { height: 8px; background: var(--series-points); }
+    .swatch.tile { height: 2px; background: var(--series-tile); }
 
     /* Sized here and redrawn at the device's pixels by the script, which is why the
        element carries no width or height attribute: the only size that matters is the
@@ -610,8 +621,18 @@
       overscroll-behavior: contain;
     }
 
+    /* Nothing in here shrinks. The panel is a flex column with a max-height, so its
+       children are shrinkable by default -- and the panel's own `#panel p` rule gives
+       every paragraph `min-height: 1.35em`, which replaces the automatic minimum that
+       would otherwise hold an item at its content height. Together those let a summary
+       line that wrapped to two rows be squeezed back down to one, and it was drawn over
+       the line beneath it. Refusing to shrink sends the overflow to the scroll, which is
+       what the scroll is for. */
+    #archive-panel > * { flex: none; }
+
     #archive-panel p {
       margin: 0;
+      min-height: 0;
       line-height: 1.35;
     }
 
@@ -705,6 +726,31 @@
     }
     button.archive-row:focus-visible { outline: 2px solid #6f8fd0; outline-offset: -2px; }
 
+    #archive-trend-legend,
+    #archive-trend-readout {
+      font-size: 12px;
+      font-variant-numeric: tabular-nums;
+      color: #9fb3c8;
+    }
+
+    #archive-trend-legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 2px 16px;
+    }
+
+    #archive-trend {
+      display: block;
+      width: 100%;
+      height: 116px;
+      /* The board reads swipes anywhere in `main`, so pointing at a game would otherwise
+         also be a move; the swipe handler skips this popup for the same reason. */
+      touch-action: none;
+    }
+
+    #archive-trend[hidden] { display: none; }
+    #archive-trend-readout:empty { display: none; }
+
     /* A game thrown away before the board ran out. Set in the label grey rather than
        marked with a glyph, for the reason archiveRow gives. */
     .archive-score.discarded { color: #9fb3c8; }
@@ -765,8 +811,10 @@
     #chart-legend, #chart-readout { font-size: 11px; }
     #archive-chart { height: 124px; }
     #archive-panel { max-height: 58vh; }
-    #archive-played, #archive-scored, #archive-reached,
-    #archive-game-title, #archive-readout, .archive-row, .archive-empty { font-size: 11px; }
+    #archive-trend { height: 100px; }
+    #archive-played, #archive-scored, #archive-reached, #archive-trend-legend,
+    #archive-trend-readout, #archive-game-title, #archive-readout,
+    .archive-row, .archive-empty { font-size: 11px; }
     /* The narrowest column goes first on a phone: a list of games is scanned for what
        they were worth, and the date is what can afford to lose the room. */
     .archive-row { gap: 6px; }
@@ -972,6 +1020,22 @@
           <p id="archive-played"></p>
           <p id="archive-scored"></p>
           <p id="archive-reached"></p>
+          <!-- The last games against each other: what each was worth, and how far each
+               got. Two lanes on two different scales -- see drawTrend for why the tiles
+               are not drawn from zero the way the scores are. -->
+          <p id="archive-trend-legend">
+            <span class="legend-entry"><span class="swatch score"></span>Score</span>
+            <span class="legend-entry"><span class="swatch tile"></span>Top tile</span>
+          </p>
+          <canvas
+            id="archive-trend"
+            role="img"
+            aria-label="Score and largest tile for each of the most recent games"
+          ></canvas>
+          <!-- The graph in words: the window, or the game being pointed at. A canvas
+               cannot be read by a screen reader and a hovered tooltip cannot be read at
+               all, so the reading lives on a line of its own. -->
+          <p id="archive-trend-readout"></p>
           <div id="archive-list"></div>
           <!-- One past game, rebuilt from the moves it was played with and drawn into
                the same graph the live game draws. Hidden until a row is opened. -->
