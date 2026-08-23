@@ -35,6 +35,91 @@ export const TIMELINE_LIMIT = 1000;
 const FOUR_SPAWN_CHANCE = 0.1;
 const DIRECTIONS = ["up", "down", "left", "right"];
 
+/* Spawn log ----------------------------------------------------------------- */
+
+/**
+ * The whole game in one byte a move.
+ *
+ * A move is deterministic given the board it is played on: collapsing a line is
+ * arithmetic, and the only thing the rules cannot derive is the tile dealt afterwards.
+ * So a game is fully described by its opening board and, for every move, the direction
+ * played and the spawn that answered it -- and every board, score and tile it ever held
+ * can be rebuilt by feeding that back through move().
+ *
+ * Which is why this is not a second copy of the timeline at a smaller size. The timeline
+ * stores boards and costs about 120 bytes a move; this stores the two facts a board can
+ * be *derived* from and costs one. A game long enough to fill the timeline stores 120 KB
+ * of boards and 1 KB of this.
+ *
+ * Seven bits, laid out so the opening board and the moves can share an array:
+ *
+ *     bits 6-5  direction index into DIRECTIONS, unused (0) on an opening spawn
+ *     bits 4-1  the cell the tile landed on, 0-15
+ *     bit  0    the tile dealt: 0 for a 2, 1 for a 4
+ *
+ * The first two entries are the two tiles reset() deals; entry 2 + n is move n + 1. So
+ * the array is always two longer than the move count, which is what lets a take-back
+ * truncate it by length alone.
+ */
+const SPAWN_LOG_OPENING = 2;
+const spawnByte = (direction, cell, value) =>
+  ((direction === null ? 0 : DIRECTIONS.indexOf(direction)) << 5) |
+  (cell << 1) |
+  (value === 4 ? 1 : 0);
+
+const spawnCell = (byte) => (byte >> 1) & 0b1111;
+const spawnValue = (byte) => ((byte & 1) === 1 ? 4 : 2);
+const spawnDirection = (byte) => DIRECTIONS[(byte >> 5) & 0b11];
+
+// Base64 rather than an array of numbers: the log rides along in the JSON save, where a
+// number costs three or four characters to write and this costs 1.33.
+function encodeSpawnLog(bytes) {
+  let binary = "";
+  for (const byte of bytes) {
+    binary += String.fromCharCode(byte);
+  }
+  return btoa(binary);
+}
+
+function decodeSpawnLog(text) {
+  if (typeof text !== "string") {
+    throw new SaveError(`Invalid saved 2048 spawn log: ${JSON.stringify(text)}`);
+  }
+  let binary;
+  try {
+    binary = atob(text);
+  } catch {
+    throw new SaveError("Invalid saved 2048 spawn log encoding");
+  }
+  const bytes = new Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    const byte = binary.charCodeAt(index);
+    // A byte with its high bit set is not something this format can produce, so a save
+    // carrying one was not written by it. Caught here rather than at replay, where it
+    // would surface as a spawn onto a cell that does not exist.
+    if (byte > 0b1111111) {
+      throw new SaveError(`Invalid saved 2048 spawn log byte: ${byte}`);
+    }
+    bytes[index] = byte;
+  }
+  if (bytes.length < SPAWN_LOG_OPENING) {
+    throw new SaveError("Saved 2048 spawn log has no opening board");
+  }
+  return bytes;
+}
+
+/**
+ * How a spawn is chosen, injected the way `random` is.
+ *
+ * The default deals at random, which is the game. Replay passes one that reads the
+ * recorded answer instead -- and that is the whole of the difference between playing a
+ * game and rebuilding one, which is why move() has no idea which is happening.
+ */
+const randomSpawn = (empty, random) => [
+  empty[Math.floor(random() * empty.length)],
+  random() < FOUR_SPAWN_CHANCE ? 4 : 2,
+];
+
 /** A rejected save, as opposed to a bug: the page offers recovery for these. */
 export class SaveError extends Error {
   constructor(message) {
@@ -67,7 +152,7 @@ function requireTile(value, name) {
   return value;
 }
 
-const topTileOf = (cells) => Math.max(...cells.map((row) => Math.max(...row)));
+export const topTileOf = (cells) => Math.max(...cells.map((row) => Math.max(...row)));
 
 function validateSavedBoard(value) {
   if (
@@ -467,7 +552,100 @@ export function decodeSavedState(serialized, { best, replayedBest }) {
     );
   }
 
-  return { timeline, history: decodeHistory(state, timeline), cursor, playSeconds, replayedFrom };
+  const history = decodeHistory(state, timeline);
+  return {
+    timeline,
+    history,
+    cursor,
+    playSeconds,
+    replayedFrom,
+    spawns: decodeSpawns(state, history, latestMoves),
+  };
+}
+
+/**
+ * The spawn log a save carries, or null where it carries none.
+ *
+ * The log is the one record here that claims to be the *whole* game, so it is the one
+ * that has to be checked against the game's own length: two opening tiles and a spawn a
+ * move. A log that disagrees would replay into a different game than the save holds --
+ * the same board reached by other tiles -- and the disagreement would surface as a graph
+ * that quietly did not match the score line above it.
+ *
+ * A history that does not start at move 0 rules a log out for the same reason. Both are
+ * only reachable through a save that predates the log: the timeline is trimmed and the
+ * history is not, so a game recorded by this build always has both from its first board.
+ */
+function decodeSpawns(state, history, latestMoves) {
+  if (state.spawns === undefined || state.spawns === null) {
+    return null;
+  }
+  const spawns = decodeSpawnLog(state.spawns);
+  if (history[0].moves !== 0) {
+    throw new SaveError(
+      `Saved 2048 spawn log arrived with a history starting at move ${history[0].moves}`
+    );
+  }
+  if (spawns.length !== latestMoves + SPAWN_LOG_OPENING) {
+    throw new SaveError(
+      `Saved 2048 spawn log holds ${spawns.length - SPAWN_LOG_OPENING} moves, ` +
+        `its game ${latestMoves}`
+    );
+  }
+  return spawns;
+}
+
+/**
+ * Rebuild a game from its spawn log: every board, score, tile and move it ever held.
+ *
+ * The rules do the work. Nothing here re-implements a move -- it deals the recorded
+ * tiles and calls the same move() the game was played through, which is the only reason
+ * a reconstruction can be trusted to agree with the game it came from. A second
+ * implementation would agree right up until the day it stopped.
+ *
+ * What it cannot rebuild is the undo tallies. Those count decisions rather than moves,
+ * and the log holds the line of play that survived them; a take-back leaves no trace in
+ * a record of what was actually dealt. They come off the archived row instead, which is
+ * where they were written down when the game ended.
+ *
+ * Returns a Game seeked to its last state. Throws SaveError on a log the rules reject,
+ * which is what a truncated or corrupt one looks like from here.
+ */
+export function replaySpawns(spawns) {
+  let at = 0;
+  // Checked against the cells actually free rather than trusted: the rules hand over the
+  // list they would have dealt from, and a log naming a cell that is not on it is
+  // describing some other game. Unchecked, it would land a tile on top of one already
+  // there and rebuild a board that was never played.
+  const dealRecorded = (empty) => {
+    const byte = spawns[at];
+    at += 1;
+    const cell = spawnCell(byte);
+    if (!empty.includes(cell)) {
+      throw new SaveError(`2048 spawn log deals onto occupied cell ${cell} at entry ${at - 1}`);
+    }
+    return [cell, spawnValue(byte)];
+  };
+  const game = new Game({
+    // Bounds nothing: the scores being rebuilt were already bounded by the save this log
+    // came out of, and this is not the game the player is playing.
+    best: Number.MAX_SAFE_INTEGER,
+    replayedBest: Number.MAX_SAFE_INTEGER,
+    spawn: dealRecorded,
+  });
+  game.reset();
+  for (let move = SPAWN_LOG_OPENING; move < spawns.length; move += 1) {
+    const direction = spawnDirection(spawns[move]);
+    if (game.gameOver) {
+      throw new SaveError(`2048 spawn log plays on past a finished board at move ${move - 1}`);
+    }
+    if (game.move(direction) === null) {
+      throw new SaveError(
+        `2048 spawn log plays ${direction} at move ${move - 1}, which moves nothing`
+      );
+    }
+  }
+  return game;
 }
 
 /**
@@ -496,8 +674,10 @@ export class Game {
     bestTile = 0,
     replayedBestTile = 0,
     random = Math.random,
+    spawn = randomSpawn,
   } = {}) {
     this.random = random;
+    this.spawn = spawn;
     this.best = requireNonNegativeInt(best, "best score");
     this.replayedBest = requireNonNegativeInt(replayedBest, "replayed best score");
     // The largest tile ever landed, split across the same two tracks as the score and
@@ -516,6 +696,18 @@ export class Game {
     this.score = 0;
     this.moves = 0;
     this.gameOver = false;
+    // Every spawn this game has been dealt, oldest first: the two opening tiles and then
+    // one a move. Null means this game cannot be replayed and never will be -- a save
+    // written before the log existed restores into that, and there is nothing to
+    // reconstruct the moves it already made from. It is not started midway, because a
+    // log missing its first thousand moves cannot rebuild the board the rest are played
+    // against.
+    //
+    // Null here at construction for that same reason and not as a placeholder: what a
+    // constructor makes is an empty board that has been dealt nothing, and the two calls
+    // that give a game its opening -- reset and restore -- are the two that give it a
+    // log. A game that has been through neither has no first board to record.
+    this.spawns = null;
     // Recorded straight away, so the cursor indexes a real state from construction on
     // and no caller has to special-case a game that has not been played yet.
     this.timeline = [captureState(this)];
@@ -617,20 +809,25 @@ export class Game {
   }
 
   /**
-   * Place a new tile on a random empty cell and return that cell's index.
+   * Place a new tile on an empty cell and return that cell's index.
    *
    * A full board is a caller bug, not a case to absorb: reset() spawns onto an empty
    * board, and a move that changed the board always leaves room -- collapsing never
    * fills cells, and a merge on a full board frees one.
+   *
+   * `direction` is the move that earned the spawn, for the log; the opening two tiles
+   * were earned by no move and pass none. It has no bearing on where the tile lands.
    */
-  spawnTile() {
+  spawnTile(direction = null) {
     const empty = emptyCells(this.cells);
     if (empty.length === 0) {
       throw new Error("No room for a new 2048 tile");
     }
-    const index = empty[Math.floor(this.random() * empty.length)];
-    this.cells[Math.floor(index / SIZE)][index % SIZE] =
-      this.random() < FOUR_SPAWN_CHANCE ? 4 : 2;
+    const [index, value] = this.spawn(empty, this.random);
+    this.cells[Math.floor(index / SIZE)][index % SIZE] = value;
+    if (this.spawns !== null) {
+      this.spawns.push(spawnByte(direction, index, value));
+    }
     return index;
   }
 
@@ -643,6 +840,10 @@ export class Game {
     // A fresh game is a clean one however the last was played: what was replayed was
     // that game's history, and this one has none yet.
     this.replayedFrom = null;
+    // Emptied before the opening tiles are dealt, so they are the first two entries --
+    // and so a game that restored without a log gets one, since this game is being
+    // recorded from its own first board and that is the whole requirement.
+    this.spawns = [];
     const spawned = [this.spawnTile(), this.spawnTile()];
     // A new game is a new timeline: the old one belonged to a game that is over.
     this.timeline = [captureState(this)];
@@ -729,6 +930,14 @@ export class Game {
       .reduce((sum, entry) => sum + entry.undos, 1);
     this.timeline.length = landed + 1;
     this.history.length = at + 1;
+    // The log is truncated with them, so what it holds stays the line of play that
+    // actually stands: it is two longer than the move count by construction, and the
+    // move being resumed from is this.moves. The spawns being dropped are the ones
+    // behind the discarded boards, and replaying the game must deal the tiles the game
+    // ends up having been dealt, not the ones it took back.
+    if (this.spawns !== null) {
+      this.spawns.length = this.moves + SPAWN_LOG_OPENING;
+    }
     this.history[at].undos += undone;
     // The clean best comes across rather than being left behind: those points were
     // really scored, before this game had rewritten anything, so taking a move back must
@@ -802,7 +1011,7 @@ export class Game {
       this.setOwnBest(this.score);
     }
     this.moves += 1;
-    const spawnedCell = this.spawnTile();
+    const spawnedCell = this.spawnTile(direction);
     // Read after the spawn, so what is claimed is the board as it stands rather than as
     // the merge left it: the tile just dealt is on it, and in the opening moves that
     // tile is sometimes the largest one there.
@@ -826,6 +1035,10 @@ export class Game {
       historyEntry(entry.moves, entry.score, entry.undos)
     );
     this.replayedFrom = saved.replayedFrom ?? null;
+    // Null where the save carried none, and stays null for the rest of this game: see
+    // the field's own note in the constructor. New Game is what clears it, because a new
+    // game is recorded from its opening board.
+    this.spawns = saved.spawns;
     this.seek(saved.cursor);
     // The boards are their own proof. Whatever the largest tile on this save is, it was
     // really landed, into the track the save says it was played on -- so that track's
@@ -861,6 +1074,12 @@ export class Game {
         }),
       },
       cursor: this.cursor,
+      // Added to the format rather than versioned into it, the same way replayed_from
+      // below was and for the same reason. It is also why the absence of this field is
+      // not corruption: every save written before the log existed lacks it, and what
+      // that means -- a game that cannot be replayed -- is exactly what a game restored
+      // from one of those has to be.
+      ...(this.spawns !== null && { spawns: encodeSpawnLog(this.spawns) }),
       // Added to the format rather than versioned into it: a reader that does not know
       // the field ignores it and still opens the game, which is what an older build
       // deployed elsewhere would otherwise be unable to do.

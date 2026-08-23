@@ -22,6 +22,7 @@ import {
   decodeSavedState,
   emptyCells,
   lineCoordinates,
+  replaySpawns,
 } from "../site/vanilla-2048/board.js";
 
 const HUGE_BEST = 10 ** 9;
@@ -1096,4 +1097,163 @@ test("a save from before time travel reads back as a one-state timeline", () => 
 
 test("a negative best score is rejected", () => {
   assert.throws(() => new Game({ best: -1 }), SaveError);
+});
+
+/* Spawn log ------------------------------------------------------------------ */
+
+/** A game played to a finish under a fixed sequence of spawns. */
+function playedOut(moves = Infinity) {
+  let seed = 20250823;
+  const random = () => (seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648;
+  const game = new Game({ ...BESTS, random });
+  game.reset();
+  let played = 0;
+  while (!game.gameOver && played < moves) {
+    for (const direction of ["left", "down", "right", "up"]) {
+      if (game.move(direction) !== null) {
+        played += 1;
+        break;
+      }
+    }
+  }
+  return game;
+}
+
+const scoresOf = (game) => game.history.map((entry) => entry.score);
+
+test("a new game records the two tiles it opens with", () => {
+  const game = new Game(BESTS);
+  assert.equal(game.spawns, null);
+  game.reset();
+  assert.equal(game.spawns.length, 2);
+});
+
+test("the log runs one entry a move, past the two it opened with", () => {
+  const game = playedOut(30);
+  assert.equal(game.spawns.length, game.moves + 2);
+});
+
+test("a game replays from its log into the same game", () => {
+  // The whole claim the log makes: a board is derivable from the tiles that were dealt
+  // to it, so this is the game rebuilt rather than a summary of it.
+  const game = playedOut();
+  const rebuilt = replaySpawns(game.spawns);
+  assert.equal(rebuilt.moves, game.moves);
+  assert.equal(rebuilt.score, game.score);
+  assert.deepEqual(rebuilt.cells, game.cells);
+  assert.deepEqual(scoresOf(rebuilt), scoresOf(game));
+  assert.equal(rebuilt.gameOver, game.gameOver);
+});
+
+test("a replayed game records the same log it was replayed from", () => {
+  // It is recording itself as it goes, off the same spawns, so the log coming back out
+  // is the tightest check there is that nothing drifted on the way through.
+  const game = playedOut(120);
+  assert.deepEqual(replaySpawns(game.spawns).spawns, game.spawns);
+});
+
+test("taking moves back drops their spawns with them", () => {
+  // The log holds the line of play that stands, not every tile the game was ever dealt:
+  // replaying the discarded ones would rebuild a game that was taken back.
+  const game = playedOut(40);
+  game.playFrom(game.timeline.length - 11);
+  assert.equal(game.spawns.length, game.moves + 2);
+  assert.equal(replaySpawns(game.spawns).score, game.score);
+});
+
+test("a game played on after a take-back still replays", () => {
+  const game = playedOut(40);
+  game.playFrom(game.timeline.length - 6);
+  for (const direction of ["up", "left", "down", "right", "left"]) {
+    game.move(direction);
+  }
+  const rebuilt = replaySpawns(game.spawns);
+  assert.equal(rebuilt.moves, game.latest.moves);
+  assert.deepEqual(rebuilt.cells, game.latest.cells);
+});
+
+test("the log survives a round trip through the save format", () => {
+  const game = playedOut(60);
+  const saved = decodeSavedState(game.encode(30), BESTS);
+  assert.deepEqual(saved.spawns, game.spawns);
+
+  const restored = new Game(BESTS);
+  restored.restore(saved);
+  restored.move("left");
+  assert.equal(restored.spawns.length, restored.latest.moves + 2);
+});
+
+test("a save with no log restores a game that cannot be replayed", () => {
+  // Every game anyone had already played when the log shipped. It stays unrecordable for
+  // the rest of its life: there is nothing to rebuild the moves it already made from.
+  const game = playedOut(20);
+  const stored = JSON.parse(game.encode(10));
+  delete stored.spawns;
+  const restored = new Game(BESTS);
+  restored.restore(decodeSavedState(JSON.stringify(stored), BESTS));
+  assert.equal(restored.spawns, null);
+  restored.move("left");
+  assert.equal(restored.spawns, null);
+  assert.equal("spawns" in JSON.parse(restored.encode(11)), false);
+});
+
+test("a new game starts recording again after an unrecordable one", () => {
+  const game = playedOut(20);
+  const stored = JSON.parse(game.encode(10));
+  delete stored.spawns;
+  const restored = new Game(BESTS);
+  restored.restore(decodeSavedState(JSON.stringify(stored), BESTS));
+  restored.reset();
+  assert.equal(restored.spawns.length, 2);
+});
+
+test("a log that does not match the game it arrived with is rejected", () => {
+  // Two records of one game, so a length they disagree on means one of them is not
+  // describing this game -- and a log that replays into a different board would show up
+  // as a graph that quietly did not match the score line above it.
+  const game = playedOut(25);
+  const stored = JSON.parse(game.encode(10));
+  stored.spawns = stored.spawns.slice(0, -4);
+  assert.throws(() => decodeSavedState(JSON.stringify(stored), BESTS), SaveError);
+});
+
+test("a log that is not base64 is rejected", () => {
+  const game = playedOut(10);
+  const stored = JSON.parse(game.encode(5));
+  stored.spawns = "not base64 !!";
+  assert.throws(() => decodeSavedState(JSON.stringify(stored), BESTS), SaveError);
+});
+
+test("a log dealing onto an occupied cell is rejected rather than replayed", () => {
+  // Unchecked this lands a tile on top of one already there and rebuilds a board that
+  // was never played, which is worse than refusing the record.
+  const game = playedOut(30);
+  const spawns = game.spawns.slice();
+  // Every move's spawn made the same cell, which the board fills within a few moves.
+  for (let index = 2; index < spawns.length; index += 1) {
+    spawns[index] = (spawns[index] & 0b1100001) | (5 << 1);
+  }
+  assert.throws(() => replaySpawns(spawns), SaveError);
+});
+
+test("a log playing a move that shifts nothing is rejected", () => {
+  const game = playedOut(20);
+  const spawns = game.spawns.slice();
+  // Force every move to the same direction: the board runs out of room to slide that
+  // way long before the log runs out of entries.
+  for (let index = 2; index < spawns.length; index += 1) {
+    spawns[index] = spawns[index] & 0b0011111;
+  }
+  assert.throws(() => replaySpawns(spawns), SaveError);
+});
+
+test("a long game costs about a byte a move to record", () => {
+  // The whole reason the log is worth keeping: the timeline stores boards, this stores
+  // what a board can be derived from, and the two are two orders of magnitude apart.
+  const game = playedOut();
+  const stored = JSON.parse(game.encode(600));
+  const timelineBytes = JSON.stringify(stored.timeline).length;
+  const logBytes = stored.spawns.length;
+  assert.ok(logBytes < game.moves * 1.4, `log is ${logBytes / game.moves} bytes a move`);
+  assert.ok(timelineBytes > logBytes * 50, "the log should be far smaller than the boards");
 });
