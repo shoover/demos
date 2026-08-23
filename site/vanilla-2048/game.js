@@ -10,6 +10,7 @@ import {
   ArchiveError,
   ENDED_DISCARDED,
   ENDED_GAME_OVER,
+  ENDED_PLAYING,
   TREND_GAMES,
   addGame,
   archiveStats,
@@ -17,6 +18,7 @@ import {
   encodeArchive,
   gameTrend,
   isClean,
+  isPlaying,
   milestones,
   summarize,
 } from "./archive.js";
@@ -401,6 +403,11 @@ const readGameRecord = async (id) => {
  */
 async function pruneSpawnLogs() {
   const kept = new Set(archive.map((row) => row.id));
+  // The game being played has no row yet and its record is already being written, so it
+  // is not an orphan -- it is the one record in the store whose game has not ended.
+  // Without this the prune that follows one game ending deletes the next game's record
+  // out from under it.
+  kept.add(currentGameId);
   const stored = await withLogStore("readonly", (store) => store.getAllKeys(), []);
   const orphans = stored.filter((id) => !kept.has(id));
   if (orphans.length > 0) {
@@ -418,6 +425,32 @@ async function pruneSpawnLogs() {
     );
   }
 }
+
+/**
+ * Write the game being played into the record store, under the id its row will carry.
+ *
+ * On the save's own cadence rather than every move. A move costs a byte and an
+ * IndexedDB transaction costs a millisecond, so writing per move would spend a
+ * millisecond to durably record one byte -- and buy nothing, because the log is already
+ * inside the five-second save beside it and a reload restores from that.
+ *
+ * What it does buy is the window at the end of a game. archiveGame writes the row and
+ * fires the record off without waiting, so a tab closed in between leaves a row claiming
+ * moves that were never stored. Keeping the record current as the game is played closes
+ * that: by the time a game ends, everything but its last few moves is already down.
+ */
+function storeLiveRecord() {
+  if (game.spawns === null || game.latest.moves === 0) {
+    return;
+  }
+  storeGameRecord(currentGameId, game.spawns, liveUndos());
+}
+
+/** The undo tallies as the archive stores them: sparse, keyed by the move taken back to. */
+const liveUndos = () =>
+  Object.fromEntries(
+    game.history.filter((entry) => entry.undos > 0).map((entry) => [entry.moves, entry.undos])
+  );
 
 /**
  * Write the game as it now stands into the archive.
@@ -456,14 +489,13 @@ function archiveGame() {
   archive = addGame(archive, row);
   persistArchive();
   if (game.spawns !== null) {
-    const undos = Object.fromEntries(
-      game.history.filter((entry) => entry.undos > 0).map((entry) => [entry.moves, entry.undos])
-    );
     // Not awaited: the archive row is what the list is made of and it is already
     // written, so the moves landing a beat later costs nothing on screen. Awaiting it
     // would put an IndexedDB round trip in front of the repaint that draws the game-over
-    // board, which is the one frame of this that anybody sees.
-    storeGameRecord(row.id, game.spawns, undos).then(pruneSpawnLogs);
+    // board, which is the one frame of this that anybody sees. What makes that safe is
+    // storeLiveRecord, which has been keeping this same record current all game: if this
+    // write never lands, what is already stored is the game bar its last few moves.
+    storeGameRecord(row.id, game.spawns, liveUndos()).then(pruneSpawnLogs);
   }
 }
 
@@ -544,7 +576,9 @@ const saver = {
   },
 
   /**
-   * Interval save, skipped when the snapshot would be byte-identical.
+   * Interval save, skipped when the snapshot would be byte-identical. Reports whether it
+   * wrote, which is what the record store hangs off: the moves are worth putting down
+   * again exactly when the game they belong to was.
    *
    * Play time is the only field that moves without a move being made, so once the
    * board is finished -- or merely idle, since the play clock pauses with the tab --
@@ -552,13 +586,14 @@ const saver = {
    */
   saveIfDue(game, playSeconds) {
     if (performance.now() - this.lastSaveTime < SAVE_INTERVAL_MS) {
-      return;
+      return false;
     }
     if (game.encode(playSeconds) === this.lastState) {
       this.defer();
-      return;
+      return false;
     }
     this.save(game, playSeconds);
+    return true;
   },
 
   refreshMetrics(now) {
@@ -1438,12 +1473,20 @@ function archiveMilestones(rows) {
  * something else.
  */
 function archiveRow(row) {
-  const element = document.createElement(row.rec ? "button" : "div");
-  element.className = "archive-row";
-  if (row.rec) {
+  // The game on the board is not opened from here even though its moves are all
+  // recorded: what opening a row does is draw that game's graph, and the live game's
+  // graph is already one button along the row above. So it is a plain row, like a game
+  // whose moves were never kept, and for a different reason.
+  const openable = row.rec && !isPlaying(row);
+  const element = document.createElement(openable ? "button" : "div");
+  element.className = `archive-row${isPlaying(row) ? " playing" : ""}`;
+  if (openable) {
     element.type = "button";
     element.dataset.id = row.id;
     element.setAttribute("aria-expanded", String(openedGame === row.id));
+  }
+  if (isPlaying(row)) {
+    element.title = "The game on the board. Its graph is under the spark-line button.";
   }
   if (openedGame === row.id) {
     element.classList.add("opened");
@@ -1483,7 +1526,10 @@ function archiveRow(row) {
     score.append(note);
   }
   element.append(
-    cell(formatStarted(row), "archive-when"),
+    // The live row names itself where the others name their start time. It has a start
+    // time too, and it is on the row above in the panel's own clock -- what this column
+    // is for here is telling you which row is the one you are playing.
+    cell(isPlaying(row) ? "Playing now" : formatStarted(row), "archive-when"),
     score,
     cell(count(row.moves), "archive-moves"),
     cell(formatDuration(row.secs), "archive-secs"),
@@ -1512,6 +1558,11 @@ const TREND_TILE_MARK = 2;
 // there means a bin covering a wide span of them, which is true and worth seeing. This
 // axis is games, where width means nothing at all.
 const TREND_MAX_MARK = 0.25;
+// How solid the game on the board is drawn, against the games that are over. Faint
+// rather than a different colour: it is the same two series, and what is different about
+// it is that it has not finished happening -- which is what a mark that has not settled
+// into full strength says without needing a fourth colour to learn.
+const TREND_LIVE_ALPHA = 0.45;
 // Which game the pointer is over on the trend graph, and the geometry that paint used.
 // Kept apart from the per-game graph's own pair rather than shared: the two are open at
 // once, over different axes, and a pointer in one says nothing about the other.
@@ -1540,18 +1591,22 @@ function trendReadout(trend) {
   }
   const game = hoveredGame === null ? null : trend.games[hoveredGame];
   if (game === null) {
-    const first = formatWhen(trend.games[0].at);
-    const last = formatWhen(trend.games[trend.games.length - 1].at);
+    const stamp = (row) => (isPlaying(row) ? "now" : formatWhen(row.at));
+    // A window of one game is not a span, and "now to now" is what saying it as one
+    // reads like. One game is named once.
+    const span =
+      trend.games.length === 1
+        ? stamp(trend.games[0])
+        : `${stamp(trend.games[0])} to ${stamp(trend.games[trend.games.length - 1])}`;
     return (
       `Last ${count(trend.games.length)} ${trend.games.length === 1 ? "game" : "games"}` +
-      `${FIELD}${first} to ${last}` +
-      `${FIELD}best ${abbreviate(trend.maxScore)}`
+      `${FIELD}${span}${FIELD}best ${abbreviate(trend.maxScore)}`
     );
   }
   // The same pair the score line prints, in the same notation: a score and the tile it
   // was reached on, with the asterisk a replayed game carries everywhere else.
   return (
-    `${formatStarted(game)}${FIELD}` +
+    `${isPlaying(game) ? "Playing now" : formatStarted(game)}${FIELD}` +
     `${abbreviate(game.score)}·${game.tile === 0 ? "–" : game.tile}` +
     `${isClean(game) ? "" : "*"}${FIELD}${count(game.moves)} moves` +
     `${FIELD}${formatDuration(game.secs)}`
@@ -1632,6 +1687,7 @@ function drawTrend(canvas, trend) {
     if (game.score === 0 || trend.maxScore === 0) {
       continue;
     }
+    context.globalAlpha = isPlaying(game) ? TREND_LIVE_ALPHA : 1;
     const barHeight = Math.max(
       CHART_MIN_MARK, (game.score / trend.maxScore) * headroom(lanes.score)
     );
@@ -1643,6 +1699,7 @@ function drawTrend(canvas, trend) {
     );
     context.fill();
   }
+  context.globalAlpha = 1;
   if (trend.maxScore > 0) {
     label(abbreviate(trend.maxScore), plotLeft - 6, lanes.score.top + CHART_LABEL_SIZE / 2, "right");
   }
@@ -1663,11 +1720,13 @@ function drawTrend(canvas, trend) {
     if (game.tile === 0) {
       continue;
     }
+    context.globalAlpha = isPlaying(game) ? TREND_LIVE_ALPHA : 1;
     context.fillRect(
       centre(index) - barWidth / 2, tileAt(game.tile) - TREND_TILE_MARK / 2,
       barWidth, TREND_TILE_MARK
     );
   }
+  context.globalAlpha = 1;
   // Both ends named, and named as tiles: the lane is drawn in exponents and nobody reads
   // in exponents. A window with one tile in it says so once rather than labelling a range
   // it does not have.
@@ -1688,13 +1747,52 @@ function drawTrend(canvas, trend) {
   // row: a game finished before start times were recorded has none, and an axis is no
   // place for a dash. The axis is also what the list is ordered by, so labelling it with
   // that is labelling it with the thing it is actually sorted on.
-  label(formatWhen(trend.games[0].at), plotLeft, plotBottom + CHART_PAD_BOTTOM / 2 + 2, "left");
+  const axisLabel = (row) => (isPlaying(row) ? "now" : formatWhen(row.at));
+  label(axisLabel(trend.games[0]), plotLeft, plotBottom + CHART_PAD_BOTTOM / 2 + 2, "left");
   if (trend.games.length > 1) {
     label(
-      formatWhen(trend.games[trend.games.length - 1].at),
+      axisLabel(trend.games[trend.games.length - 1]),
       plotRight, plotBottom + CHART_PAD_BOTTOM / 2 + 2, "right"
     );
   }
+}
+
+/**
+ * The game on the board as a row, or null when there is no game to show one for.
+ *
+ * Built rather than stored. The archive is what a game leaves behind when it ends, and
+ * this game has not ended -- so it is assembled at paint time from the live game and
+ * joins the list only on screen. That also means it cannot go stale: there is nothing
+ * written down for a crash to leave behind claiming a game is still being played.
+ *
+ * It never needs repainting while it is up, either. Every popup stops play, this one
+ * included, so the figures on this row are frozen for exactly as long as anyone is
+ * looking at them.
+ *
+ * A board still on its opening tiles is not a game and gets no row, which is the same
+ * rule archiveGame files by.
+ */
+function liveRow() {
+  const latest = game.latest;
+  if (latest.moves === 0) {
+    return null;
+  }
+  return summarize({
+    id: currentGameId,
+    startedAt: currentGameStarted,
+    // The row is about a game that has not ended, so what is stamped here is the moment
+    // it was looked at. Nothing reads it: the list is ordered with this row first by
+    // construction, and the trend axis labels the archived games around it.
+    endedAt: Date.now(),
+    ending: ENDED_PLAYING,
+    score: latest.score,
+    topTile: topTileOf(latest.cells),
+    moves: latest.moves,
+    undos: game.history.reduce((total, entry) => total + entry.undos, 0),
+    seconds: playTime.elapsed(),
+    replayedFrom: game.replayedFrom,
+    recorded: game.spawns !== null,
+  });
 }
 
 /**
@@ -1735,11 +1833,24 @@ function paintArchive() {
     return;
   }
 
-  const rows = archive.filter(ARCHIVE_TRACKS[archiveTrack]);
-  const [played, scored] = archiveSummary(rows);
-  elements.archivePlayed.textContent = rows.length === 0 ? "" : played;
-  elements.archiveScored.textContent = rows.length === 0 ? "" : scored;
-  elements.archiveReached.textContent = rows.length === 0 ? "" : archiveMilestones(rows);
+  const stored = archive.filter(ARCHIVE_TRACKS[archiveTrack]);
+  // The game on the board joins the list and the graph but stays out of the figures.
+  // Those are readings of games that are over -- a median taken over a game twenty moves
+  // in is a median of something that has not happened yet -- and the played line says
+  // the live game is there rather than quietly folding it in.
+  const live = liveRow();
+  const showLive = live !== null && ARCHIVE_TRACKS[archiveTrack](live);
+  const rows = showLive ? [live, ...stored] : stored;
+
+  const [played, scored] = archiveSummary(stored);
+  // A non-breaking space, so the count and the word wrap as the one field they are. It
+  // is the last field on the longest line in the panel and the first thing pushed onto a
+  // second row, where "1" stranded at the end of the line above reads as a stray digit.
+  const playing = showLive ? `${stored.length === 0 ? "" : FIELD}1 playing` : "";
+  elements.archivePlayed.textContent =
+    stored.length === 0 && !showLive ? "" : `${stored.length === 0 ? "" : played}${playing}`;
+  elements.archiveScored.textContent = stored.length === 0 ? "" : scored;
+  elements.archiveReached.textContent = stored.length === 0 ? "" : archiveMilestones(stored);
 
   if (rows.length === 0) {
     // What is missing depends on which track is being asked about, and the difference is
@@ -2910,8 +3021,10 @@ function frame(now) {
   const playSeconds = playTime.elapsed();
   // acceptingInput doubles as "startup succeeded": with the recovery overlay up, an
   // interval save would quietly overwrite the very state the user is being asked about.
-  if (acceptingInput) {
-    saver.saveIfDue(game, playSeconds);
+  if (acceptingInput && saver.saveIfDue(game, playSeconds)) {
+    // On the same beat as the save that just went down, so the two records of this game
+    // never drift more than one interval apart.
+    storeLiveRecord();
   }
   saver.refreshMetrics(now);
   if (now - lastStatsPaint >= STATS_REFRESH_MS) {

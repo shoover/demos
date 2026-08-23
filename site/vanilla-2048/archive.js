@@ -43,7 +43,13 @@ export class ArchiveError extends Error {
 // let a habit of restarting bad openings read as a collapse in scoring.
 export const ENDED_GAME_OVER = "over";
 export const ENDED_DISCARDED = "discarded";
-const ENDINGS = [ENDED_GAME_OVER, ENDED_DISCARDED];
+// The game on the board, which has not ended at all. A row in this state is built for the
+// panel to show and is never stored: the archive is what games leave behind, and a game
+// still being played has not left anything behind yet. It goes through summarize with the
+// others so the list has one row shape rather than two, and decodeArchive refuses to read
+// one back for the same reason nothing writes one.
+export const ENDED_PLAYING = "playing";
+const ENDINGS = [ENDED_GAME_OVER, ENDED_DISCARDED, ENDED_PLAYING];
 
 // Named apart from board.js's identical-looking check, which rejects into SaveError
 // rather than ArchiveError -- and, more to the point, because the bundled build
@@ -129,6 +135,9 @@ function requireFiniteSeconds(seconds) {
 /** Whether a row is a game played straight through, rather than one played on from. */
 export const isClean = (row) => row.from === null;
 
+/** Whether a row is the game currently on the board. */
+export const isPlaying = (row) => row.end === ENDED_PLAYING;
+
 export function encodeArchive(rows) {
   return JSON.stringify({ version: ARCHIVE_VERSION, games: rows });
 }
@@ -161,8 +170,11 @@ export function decodeArchive(serialized) {
   if (!Array.isArray(stored.games)) {
     throw new ArchiveError("Invalid archived 2048 games list");
   }
-  return stored.games.map((row) =>
-    summarize({
+  return stored.games.map((row) => {
+    if (row !== null && typeof row === "object" && row.end === ENDED_PLAYING) {
+      throw new ArchiveError("Archived 2048 games hold a game that never ended");
+    }
+    return summarize({
       id: row.id,
       startedAt: row.st ?? null,
       endedAt: row.at,
@@ -174,8 +186,8 @@ export function decodeArchive(serialized) {
       seconds: row.secs,
       replayedFrom: row.from ?? null,
       recorded: row.rec,
-    })
-  );
+    });
+  });
 }
 
 /**
