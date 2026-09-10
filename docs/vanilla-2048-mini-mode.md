@@ -139,7 +139,7 @@ arithmetic ceiling and play lands well below it -- so mini wants its own
 list, `[512, 256, 128, 64, 32]` as a starting guess, checked against actual
 games before it is fixed.
 
-## Where the choice went: four options, and the measurements
+## Where the choice went: the options, and the measurements
 
 `#actions` held six controls: New Game, Undo, Share, and three icon buttons.
 It is `flex-wrap`, and the panel is already at its width limit on a phone --
@@ -155,19 +155,31 @@ already means "this one is in force" means it here too. The mode is never
 ambiguous, which matters because Best changes meaning with it. One press to
 switch. Costs the most width of any option: two buttons and their gaps.
 
-**B. A single `Mini` toggle, `aria-pressed`. Built.** Half the width of A,
-and it is an icon beside the other three -- a 3x3 of squares, the same kind
-of glyph they already use, in the same accent `#archive-tracks` uses for the
-filter in force. It says less about what the two states are than a labelled
-pair does, but the board underneath is showing three columns or four, which
-is the least ambiguous readout available.
+**B. A single `Mini` toggle, `aria-pressed`.** Half the width of A, as an
+icon beside the other three. Built first, and replaced: a toggle can only
+ever name the state it is *not* in, so the one thing it cannot show is what
+the sizes are.
 
-What paid for it was the Share button, which became the share sheet's own
-glyph in the same change: the word was 31px that the toggle and the two
-dividers then spent. The toolbar stays on one row from 340px up, and the
-dividers themselves are dropped below 350px, where they are what costs the
-row its second line. Below about 330px it wraps -- a width where the panel is
-already stepping its type down.
+**E. A settings picker: `Size 4 >`, opening on `3x3` / `4x4`. Built.** The
+shape a phone's settings row uses, at the width a toolbar can afford: the
+label muted, the size in force in the panel's own tabular figures, and a
+chevron that turns down when the list is open. The list holds the two boards
+spelled out, with a tick against the one in force rather than a fill --
+against two options a filled row and a hovered row would be the same gesture
+in two colours.
+
+It is the only popup here anchored to its own control rather than to the
+panel, which the others earn by holding a slider or a graph. It costs 65px
+against the toggle's 29px, and that is the trade: the sizes are named on
+screen instead of guessed at.
+
+Two icons paid most of it back. Share became the share sheet's own glyph and
+Undo the arrow doubling back on itself -- deliberately not the circular
+arrow, which also means restart, with New Game two controls away in the same
+row. The toolbar wants 338px and holds one row from 360px up; the dividers
+are dropped below 375px, where they are what costs it a second line. Below
+340px it wraps, at a width where the panel is already stepping its type
+down.
 
 **C. Inside the New Game question.** No new chrome at rest: "Discard this
 game?" gains "New 4x4" and "New 3x3" beside Resume. But New Game is the most

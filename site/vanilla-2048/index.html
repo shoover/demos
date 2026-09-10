@@ -322,18 +322,99 @@
        sized like the buttons beside them. */
     #time-travel,
     #graph,
-    #mini,
-    #share {
+    #share,
+    #undo {
       display: grid;
       place-items: center;
     }
 
-    /* The mode in force, in the accent a pressed button takes -- the same colour, and
-       for the same reason, as the track in force in the past-games list. */
-    #mini[aria-pressed="true"] {
-      border-color: #6f8fd0;
-      background: #4b6eaf;
+    /* Board size ------------------------------------------------------------ */
+
+    /* The one popup anchored to its own control rather than to the panel, so the
+       wrapper is what it is measured from. */
+    .picker { position: relative; display: flex; }
+
+    #board-size {
+      display: flex;
+      align-items: center;
+      gap: 5px;
     }
+
+    /* The label recedes and the value does not: what is being read off this row at a
+       glance is which board is in force, and the word is only there to say what the
+       figure counts. Both in the panel's own muted grey and its own tabular figures. */
+    .picker-label { color: #9fb3c8; }
+    .picker-value { font-variant-numeric: tabular-nums; }
+
+    .picker-chevron {
+      width: 11px;
+      height: 11px;
+      fill: none;
+      stroke: currentColor;
+      stroke-width: 2.6;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+      opacity: 0.5;
+      transform: rotate(0deg);
+      transition: transform 120ms ease;
+    }
+
+    /* Pointing at what it opened, once it is open. The turn is the whole animation on
+       this control, and it is dropped outright where motion is not wanted. */
+    #board-size[aria-expanded="true"] .picker-chevron { transform: rotate(90deg); }
+
+    @media (prefers-reduced-motion: reduce) {
+      .picker-chevron { transition: none; }
+    }
+
+    #board-size-menu {
+      position: absolute;
+      top: calc(100% + 6px);
+      left: 0;
+      z-index: 2;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      min-width: 100%;
+      padding: 4px;
+      border: 1px solid rgba(255, 255, 255, 0.14);
+      border-radius: 8px;
+      /* The ground and the shadow the other popups use: this is a smaller thing of the
+         same kind, and a second treatment would make it read as a different one. */
+      background: #12151f;
+      box-shadow: 0 8px 28px rgba(0, 0, 0, 0.32);
+    }
+
+    #board-size-menu[hidden] { display: none; }
+
+    #board-size-menu button {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      justify-content: space-between;
+      border-color: transparent;
+      background: none;
+      white-space: nowrap;
+    }
+
+    #board-size-menu button:hover { background: #343434; }
+
+    /* The tick marks the row in force, which is what a list of two does instead of
+       filling one of them in: a filled row and a hovered row would be the same gesture
+       in two colours. Held in the layout when it is not shown, so picking the other size
+       does not shift the row under the pointer. */
+    .picker-check {
+      width: 12px;
+      height: 12px;
+      fill: none;
+      stroke: currentColor;
+      stroke-width: 2.6;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+      visibility: hidden;
+    }
+
+    #board-size-menu button[aria-checked="true"] .picker-check { visibility: visible; }
 
     /* Drawn rather than set: the panel's font is a Latin subset with no clock in it,
        and an emoji would arrive in the system's own colours, which this panel has
@@ -341,8 +422,8 @@
     #time-travel svg,
     #past-games svg,
     #graph svg,
-    #mini svg,
-    #share svg {
+    #share svg,
+    #undo svg {
       width: 15px;
       height: 15px;
       fill: none;
@@ -866,11 +947,12 @@
        what push it onto a second row on a 360px screen -- which the board then pays for
        in height, since it is sized from what the panel leaves over. */
     #actions, .action-group { gap: 6px; }
-    /* Below 350px even that is not enough, and the dividers go before the row does. They
-       say how the controls group, which is worth their width right up until it is what
-       costs the toolbar a second line -- and that line comes out of the board, which is
-       the thing all this is being divided up for. The order still groups them. */
-    @media (max-width: 349px) { .action-rule { display: none; } }
+    /* Below 375px even that is not enough -- the row wants 338px and a 360px phone
+       leaves it 330 -- and the dividers go before the row does. They say how the controls
+       group, which is worth their 14px right up until it is what costs the toolbar a
+       second line, and that line comes out of the board, which is the thing all this is
+       being divided up for. The order still groups them. */
+    @media (max-width: 374px) { .action-rule { display: none; } }
     #chart { height: 148px; }
     #chart-legend, #chart-readout { font-size: 11px; }
     #archive-chart { height: 124px; }
@@ -940,26 +1022,51 @@
              is a layout run rather than a thing to be positioned against. -->
         <div class="action-group">
           <button id="new-game" type="button">New Game</button>
-          <!-- The board, three cells a side instead of four. A toggle rather than a pair
-               of sizes to choose between: there are two, the board underneath is already
-               showing which one is on, and the row has no width to spare for saying it
-               twice.
+          <!-- The board a game is played on, named and picked rather than toggled. A
+               settings row's shape, at the width a toolbar can afford: the label, the
+               size in force, and a chevron saying there is more behind it. Pressed, it
+               lists what there is -- which is the part a toggle cannot do, since a toggle
+               only ever says what it is not currently.
 
-               Pressing it does not cost the game in hand. Each size keeps its own save,
-               so this puts one game down and takes the other up, and pressing back
-               returns to the board exactly as it was left. -->
-          <button
-            id="mini"
-            type="button"
-            aria-pressed="false"
-            aria-label="Mini board"
-            title="Mini board: 3x3"
-          >
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <rect x="3.5" y="3.5" width="17" height="17" rx="2.5" />
-              <path d="M9.2 3.5 V20.5 M14.8 3.5 V20.5 M3.5 9.2 H20.5 M3.5 14.8 H20.5" />
-            </svg>
-          </button>
+               The value is the figure alone because the board is square and the row is
+               narrow; the options spell it out, where there is room to.
+
+               Picking does not cost the game in hand. Each size keeps its own save, so
+               this puts one game down and takes the other up, and picking back returns
+               to the board exactly as it was left. -->
+          <div class="picker">
+            <button
+              id="board-size"
+              type="button"
+              aria-haspopup="true"
+              aria-expanded="false"
+              aria-controls="board-size-menu"
+              title="Board size"
+            >
+              <span class="picker-label">Size</span>
+              <span class="picker-value" id="board-size-value">4</span>
+              <svg class="picker-chevron" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M9.5 4.5 L17 12 L9.5 19.5" />
+              </svg>
+            </button>
+            <!-- Anchored to the picker rather than to the panel, unlike every other popup
+                 here: those hold a slider or a graph and are worth the panel's width,
+                 and this holds two words. -->
+            <div id="board-size-menu" role="menu" aria-label="Board size" hidden>
+              <button type="button" role="menuitemradio" data-size="3" aria-checked="false">
+                <span>3x3</span>
+                <svg class="picker-check" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M5 12.5 L10 17.5 L19 6.5" />
+                </svg>
+              </button>
+              <button type="button" role="menuitemradio" data-size="4" aria-checked="true">
+                <span>4x4</span>
+                <svg class="picker-check" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M5 12.5 L10 17.5 L19 6.5" />
+                </svg>
+              </button>
+            </div>
+          </div>
           <!-- The share sheet's own glyph: a page with an arrow leaving it. The word was
                the widest thing in the row that was not the game's own name, and this is
                the one action here that already has a picture everyone knows. -->
@@ -982,7 +1089,24 @@
                Disabled while an earlier state is on screen, so it always means the same
                thing and always costs the same: one move, the newest one. Reaching back
                further is what the popup is for, and the popup says what that costs. -->
-          <button id="undo" type="button" title="Take back the last move" disabled>Undo</button>
+          <!-- The arrow every application draws for this: back to the left, then round
+               and under. Not the circle-and-arrowhead that also means restart -- New Game
+               is two controls away in the same row, and the two must not be guessed at.
+
+               It leads the run it belongs to, so the shape is read off its neighbours as
+               well: a move taken back, then the moves walked, then the game graphed. -->
+          <button
+            id="undo"
+            type="button"
+            aria-label="Undo"
+            title="Take back the last move"
+            disabled
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M9 14.5 L3.8 9.3 L9 4" />
+              <path d="M3.8 9.3 H14.6 A5.7 5.7 0 0 1 14.6 20.7 H10.8" />
+            </svg>
+          </button>
           <button
             id="time-travel"
             type="button"

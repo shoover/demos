@@ -134,7 +134,9 @@ const elements = {
   overlay: document.getElementById("overlay"),
   nextMove: document.getElementById("next-move"),
   newGame: document.getElementById("new-game"),
-  mini: document.getElementById("mini"),
+  boardSize: document.getElementById("board-size"),
+  boardSizeValue: document.getElementById("board-size-value"),
+  boardSizeMenu: document.getElementById("board-size-menu"),
   share: document.getElementById("share"),
   newGameConfirm: document.getElementById("new-game-confirm"),
   confirmNewGame: document.getElementById("confirm-new-game"),
@@ -183,6 +185,7 @@ const compactMedia = window.matchMedia(
  */
 function popupOpen() {
   return (
+    !elements.boardSizeMenu.hidden ||
     !elements.timeline.hidden ||
     !elements.statsPanel.hidden ||
     !elements.archivePanel.hidden ||
@@ -2298,6 +2301,55 @@ function commitChange(bestChanged = false) {
 }
 
 /**
+ * Say which board is in force: the figure on the picker, and the tick in its list.
+ *
+ * Both from the game rather than from whatever was last pressed, so the picker cannot
+ * disagree with the board -- a restore, a switch and a corrupt save that sent startup
+ * back to the other size all come through here.
+ */
+function paintBoardSize() {
+  elements.boardSizeValue.textContent = String(game.size);
+  for (const option of elements.boardSizeMenu.querySelectorAll("button")) {
+    option.setAttribute("aria-checked", String(Number(option.dataset.size) === game.size));
+  }
+}
+
+/**
+ * Show or hide the list of board sizes.
+ *
+ * A popup like the others: opening it puts them away, play stops while it is up, and a
+ * press anywhere else or Escape closes it. Unlike them it is anchored to its own control
+ * rather than to the panel, because two words do not want the panel's width.
+ */
+function setSizeMenuOpen(open) {
+  if (open) {
+    if (!elements.timeline.hidden) {
+      closeTimeline();
+    }
+    if (!elements.statsPanel.hidden) {
+      setStatsOpen(false);
+    }
+    if (!elements.archivePanel.hidden) {
+      setArchiveOpen(false);
+    }
+    if (!elements.newGameConfirm.hidden) {
+      setConfirmOpen(false);
+    }
+  }
+  elements.boardSizeMenu.hidden = !open;
+  elements.boardSize.setAttribute("aria-expanded", String(open));
+  // Focus follows the list: opening hands it to the size in force, which is the row a
+  // keyboard is most likely to be arriving at, and closing hands it back to the picker
+  // if it was still inside.
+  if (open) {
+    elements.boardSizeMenu.querySelector('[aria-checked="true"]')?.focus();
+  } else if (elements.boardSizeMenu.contains(document.activeElement)) {
+    elements.boardSize.focus();
+  }
+  syncPlayState();
+}
+
+/**
  * Show or hide the question New Game asks.
  *
  * Opening hands focus to the answer that was asked for: the press that opened this was a
@@ -2547,6 +2599,12 @@ window.addEventListener("keydown", (event) => {
   if (event.ctrlKey || event.metaKey || event.altKey) {
     return;
   }
+  if (event.key === "Escape" && !elements.boardSizeMenu.hidden) {
+    event.preventDefault();
+    setSizeMenuOpen(false);
+    elements.boardSize.focus();
+    return;
+  }
   if (event.key === "Escape" && !elements.timeline.hidden) {
     event.preventDefault();
     closeTimeline();
@@ -2786,6 +2844,15 @@ elements.scrubber.addEventListener("input", () =>
 document.addEventListener("pointerdown", (event) => {
   const target = event.target instanceof Element ? event.target : null;
   let dismissed = false;
+  // Not a press on the picker itself, which is a second press for the list and closes
+  // it by itself -- dismissing it here would leave that press with nothing left to do.
+  if (
+    !elements.boardSizeMenu.hidden &&
+    target?.closest("#board-size-menu, #board-size") === null
+  ) {
+    setSizeMenuOpen(false);
+    dismissed = true;
+  }
   if (!elements.timeline.hidden && target?.closest("#timeline, #time-travel") === null) {
     closeTimeline();
     dismissed = true;
@@ -2819,12 +2886,20 @@ document.addEventListener("pointerdown", (event) => {
   dismissingPress = dismissed;
 });
 elements.newGame.addEventListener("click", requestNewGame);
-// The board, switched. Nothing is asked first because nothing is lost: the game being
-// left is saved under its own key on the way out, which is what switchBoard does before
-// it opens the other one.
-onPress(elements.mini, () =>
-  switchBoard(game.size === MINI_SIZE ? DEFAULT_SIZE : MINI_SIZE)
-);
+onPress(elements.boardSize, () => setSizeMenuOpen(elements.boardSizeMenu.hidden));
+
+// The board, picked. Nothing is asked first because nothing is lost: the game being left
+// is saved under its own key on the way out, which is what switchBoard does before it
+// opens the other one. Picking the size already in force is a press that only closes the
+// list, which switchBoard makes free by returning on it.
+elements.boardSizeMenu.addEventListener("click", (event) => {
+  const option = event.target instanceof Element ? event.target.closest("button") : null;
+  if (option === null) {
+    return;
+  }
+  setSizeMenuOpen(false);
+  switchBoard(Number(option.dataset.size));
+});
 elements.confirmNewGame.addEventListener("click", startNewGame);
 document
   .getElementById("resume-game")
@@ -3130,7 +3205,7 @@ function openBoard(size, describe) {
   }
 
   storage.setItem(BOARD_SIZE_KEY, String(size));
-  elements.mini.setAttribute("aria-pressed", String(size === MINI_SIZE));
+  paintBoardSize();
   // The list follows the board: what is being played is what a player is asking the
   // archive about. Either size is still one press away inside the panel.
   archiveSize = size;
@@ -3140,6 +3215,7 @@ function openBoard(size, describe) {
   // Everything in them belongs to the game just put down.
   setTimelineOpen(false);
   setConfirmOpen(false);
+  setSizeMenuOpen(false);
   paintGrid();
 
   if (restored) {
