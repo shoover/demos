@@ -28,6 +28,10 @@
  *                         under score-optimal play, written to scoredist.csv
  *   solve33 movetest      hex boards on stdin, each move's result on stdout,
  *                         for diffing against site/vanilla-2048/board.js
+ *
+ * GOAL=512 in the environment ends the game the moment that tile appears, so
+ * the counts are the ones a solve aimed at that tile would face. Counting
+ * only: it truncates the graph the backward pass would need.
  */
 #include <stdint.h>
 #include <stdio.h>
@@ -187,6 +191,7 @@ static inline board_t transpose(board_t b)
  * square, otherwise the 4 that do not swap the axes. The rules are equivariant
  * under all of them, so a state and its images have identical values. */
 static int use_sym = 1;
+static uint32_t stop_exp = 0;   /* goal tile: reaching it ends the game */
 
 static inline board_t canonical(board_t b)
 {
@@ -305,13 +310,16 @@ static uint32_t enumerate(uint64_t cap, int quiet, int discard)
             goto done;
         }
 
-        /* Afterstates: every legal move from every state in this grade. */
+        /* Afterstates: every legal move from every state in this grade. A
+         * goal-directed solve stops dead at the goal tile, so those positions
+         * are leaves and nothing past them is ever enumerated. */
         vec after = { 0 };
         uint32_t mt = 0;
         for (size_t i = 0; i < L->n; i++) {
             board_t b = L->a[i];
             uint32_t e = max_exp(b);
             if (e > mt) mt = e;
+            if (stop_exp && e >= stop_exp) continue;
             for (int d = 0; d < 4; d++) {
                 uint32_t g;
                 board_t nb = do_move(b, d, &g);
@@ -658,6 +666,19 @@ int main(int argc, char **argv)
     const char *mode = argc > 1 ? argv[1] : "count";
     uint64_t cap = argc > 2 ? strtoull(argv[2], NULL, 10) : 0;
     if (!strcmp(mode, "countraw")) { use_sym = 0; mode = "count"; }
+    /* "count512" / "countraw512": stop the game dead at that tile. */
+    {
+        const char *g = getenv("GOAL");
+        if (g) {
+            if (strcmp(mode, "count")) {
+                fprintf(stderr, "GOAL truncates the graph; it only makes "
+                                "sense with count/countraw\n");
+                return 2;
+            }
+            uint32_t v = strtoul(g, NULL, 10);
+            while ((1u << stop_exp) < v) stop_exp++;
+        }
+    }
 
     if (!strcmp(mode, "movetest")) { move_test(); return 0; }
 

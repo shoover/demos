@@ -10,31 +10,95 @@ Nothing here is implemented in the demos. The numbers are real: everything
 labelled *measured* came out of `scripts/solve-2048.c` on one core of the
 machine these notes were written on.
 
-## The one fact the method rests on
+One caveat on sourcing. His article was not reachable from where this was
+written, so the account of how his program works is assembled from indexed
+excerpts of it and not from a full read; treat the quoted phrases as his and
+the rest as a fair-faith reconstruction. Every measurement here is first-hand,
+and the reproduced probabilities agree with his published ones to every digit
+he quotes, which is the evidence that the reconstruction is of the right
+computation.
+
+## What any exact method needs
 
 A move conserves the tile sum. Merging two 2s into a 4 moves value around the
 board but does not create any, and sliding moves none at all. The only thing
 that adds value is the spawn that answers the move, and it adds exactly 2 or
 exactly 4.
 
-So every turn raises the tile sum, and nothing ever lowers it. Two consequences
-do all the work:
+So every turn raises the tile sum and nothing ever lowers it, which means **no
+position can ever repeat**. The game graph is a DAG. That is what makes an
+exact answer possible at all: the value of a position is a plain backward
+induction, with no value iteration, no simultaneous equations, no convergence
+threshold. Every method below relies on this and nothing else.
 
-- **No position can ever repeat**, in a game or across games. The state graph
-  is a DAG, so the value of a position is a plain backward induction over it --
-  no value iteration, no system of simultaneous equations, no discounting, no
-  convergence threshold. The answer is exact and arrives in one pass.
-- **The tile sum grades the DAG.** Every edge steps from grade `s` to grade
-  `s+2` or `s+4`. Process grades in decreasing order and the values you need
-  are always the two grades you just finished.
+What the methods disagree about is the *order* they visit the DAG in, and that
+turns out to be the whole feasibility question.
 
-That second point is the one that decides feasibility, and it is easy to miss.
-It means a solve never has to hold the whole state space: **three grades at a
-time is enough**, whatever the total.
+## What Tatham's program does
+
+Two mutually recursive functions, memoised. `pvalue` takes a position with the
+player to move; `cvalue` takes one that has moved and awaits its spawn. Each
+returns the probability of the goal from there, and results go in a cache so a
+position reached by two different routes is computed once.
+
+He sets out the tradeoff he is taking against a bottom-up dynamic program:
+recursion risks stack overflow, while DP *"must evaluate every position, not
+just positions reachable in legal play"*. He picks recursion, on the grounds
+that a 2048 game is only a few hundred moves deep -- nowhere near enough to
+trouble an ordinary Linux stack.
+
+Three more decisions, and all of them are about RAM, because running out of it
+means getting no answer at all:
+
+- **Only `pvalue`s are cached, not `cvalue`s.** A `cvalue` recomputed on a
+  second visit costs little, since the `pvalue`s underneath it are cached
+  already. Measured on 3x3 for the 512 goal: 125,680,153 positions against
+  74,083,224 afterstates, so caching one and not both is a **1.6x** saving.
+- **`float` before `double`.** The first run used single precision; double came
+  only on a later re-run with more RAM to hand. Worth 4 bytes an entry.
+- **Symmetry: considered, and not implemented.** He notes that rotations and
+  reflections of a position have the same probability of winning, and leaves it
+  there.
+
+That last one is the striking part, because it was worth more than the two he
+took put together. Measured on 3x3, again for the 512 goal: 125,680,153
+positions fold to 15,766,405, a factor of **7.97**. He was optimising hard for
+the resource that was actually binding, and the largest lever available was the
+one set aside -- reasonably enough, since the thing already fit.
+
+## Where this note departs, and what each departure is worth
+
+Same DAG, same arithmetic, different traversal. This solver **enumerates the
+reachable positions forward, grade by grade, then sweeps backward through
+them**. That is a bottom-up DP, but not the kind he rejects: the forward pass
+has already discarded everything legal play cannot reach, so the sweep
+evaluates exactly the positions his recursion would and no others.
+
+Which means the first saving below is one both designs already have. Only the
+second and third are departures. Measured on 3x3, against every board the rules
+could write down:
+
+| | positions | vs all boards |
+|---|---|---|
+| every 3x3 board with tiles up to 1024 | 2,357,947,691 | |
+| ...reachable in legal play (both designs) | 388,921,077 | **6.1x** |
+| ...and folded by symmetry (here only) | 48,713,519 | **48x** |
+
+Then the third, which has no analogue in his design at all. Because the tile
+sum grades the DAG -- every edge steps from grade `s` to `s+2` or `s+4` -- a
+backward sweep only ever needs the two grades it just finished. **Three grades
+resident, whatever the total.** A memoised recursion cannot do this: it has no
+way of knowing which cached positions it is finished with, so it keeps them
+all.
+
+For the 512 question on 3x3 that is 125,680,153 cached positions against a
+window of 71,832 x 3. It is the difference between about **1.5 GB and 3.4 MB**
+for the identical answer, and on 3x3 it buys nothing anyone needed -- 1.5 GB is
+fine. On 4x4 it is the only reason the question is worth asking at all.
 
 ## The two kinds of node
 
-Splitting each turn in half keeps the arithmetic honest and cuts the work:
+The `pvalue` / `cvalue` split is worth keeping whichever way round you go:
 
 - a **state** is a board with the player to move (just after a spawn)
 - an **afterstate** is a board just after a move, before the spawn
@@ -52,13 +116,22 @@ the expensive half -- is done once per afterstate instead of once per
 legal `(state, move)` pairs but only 31,431,374 distinct afterstates, a **3.8x**
 saving on the spawn expansion.
 
-## Symmetry
+## Goals shrink the problem more than anything else
 
-The rules are equivariant under the board's symmetry group -- the eight
-dihedral images on a square board, four when it is not square -- so a board and
-its images have equal value. Canonicalising each board to the least of its
-images is exact, not an approximation. Measured on 3x3: 388,921,077 states
-collapse to 48,713,519, a factor of **7.98** against a theoretical ceiling of 8.
+A solve aimed at one tile stops dead when that tile appears, so no position
+still in play holds anything bigger than half of it. Measured on 3x3,
+unreduced, which is the size of cache his recursion would need for each:
+
+| question | positions | peak grade |
+|---|---|---|
+| P(256) | 57,887,135 | 430,802 |
+| P(512) | 125,680,153 | 573,576 |
+| P(1024) | 244,489,347 | 686,474 |
+| whole game, for expected score | 388,921,077 | 742,498 |
+
+Asking about 512 is a third of the work of solving the game outright, and
+asking about 256 is a seventh. This is free and exact, and it is the single
+biggest lever on 4x4.
 
 ## Reproducing the 3x3 answer
 
@@ -284,30 +357,53 @@ because it is not the one the headline state counts suggest.
   one a "48 million states" headline for 3x3 hides -- there, the same quantity
   is 4.5 MB, which is why the 3x3 solve is a coffee break and this one is not.
 
+And this is where the traversal order stops being a matter of taste. A memoised
+recursion has to keep every position it has computed, because it has no idea
+which ones it is finished with. On 3x3 that is a gigabyte or two and nobody
+cares. On 4x4, asking only about 2048, it is the entire reachable set resident
+at once:
+
+| | resident at peak |
+|---|---|
+| memoised recursion, no symmetry, `float` values | **30 - 140 PB** |
+| forward enumeration, symmetry, three-grade window | **10 - 48 TB** |
+
+About three thousand times apart, for exactly the same answer -- and the better
+one is still a thousand times too big. So the honest form of the question is not
+whether his method scales. It is that **the optimisation his design does not
+have is the one that matters on 4x4, and adding it is still not enough.**
+
+None of which is a criticism of the program he wrote. At 3x3 the recursion is
+the better engineering call: it is a page of code, it visits only reachable
+positions by construction, and it fits. The grade window is an answer to a
+problem 3x3 does not have.
+
 ## The shortcuts, in the order worth taking them
 
-Four cost nothing -- they change the size of the problem, not the answer. All
-four are already in the numbers above; without them 3x3 is a much duller story.
+Five cost nothing -- they change the size of the problem, not the answer. All
+five are in the numbers above; without them 3x3 is a much duller story.
 
 1. **Grade streaming.** Hold three grades, not the space. This is what turns
    "48 million states" into "4.5 MB resident" on 3x3, and it is the difference
    between 4x4 needing 10 TB and needing 5,000 TB.
 2. **Cap the tiles at the goal.** Making 2048 an absorbing win means no board
    still in play holds more than 1024, and 4x4 drops from `16^16` boards to
-   `11^16` -- **401x**, exactly, for free. The 3x3 analogue is why asking about
-   512 is much cheaper than solving the whole game.
-3. **Symmetry.** Measured 7.98x on 3x3, against a ceiling of 8. Only 4x on a
+   `11^16` -- **401x**, exactly, for free.
+3. **Visit only reachable positions.** 6.1x on 3x3. Free in a recursion, and
+   the reason a naive bottom-up DP is the wrong shape; the forward-then-backward
+   pass here keeps it.
+4. **Symmetry.** Measured 7.98x on 3x3, against a ceiling of 8. Only 4x on a
    non-square board, which is part of why 4x3 was reachable and 4x4 is not just
    "one more column".
-4. **Afterstates.** 3.8x fewer spawn-averagings on 3x3. Pure compute, no
+5. **Afterstates.** 3.8x fewer spawn-averagings on 3x3. Pure compute, no
    memory cost.
 
 Two more trade one resource for another:
 
-5. **Quantise the values.** A probability in 16-bit fixed point is a quarter
+6. **Quantise the values.** A probability in 16-bit fixed point is a quarter
    the size of a double and still far more precise than the question deserves.
    It takes a state from 16 bytes to 10 -- worth having, not decisive.
-6. **Index by rank instead of storing keys.** The same coefficient DP that
+7. **Index by rank instead of storing keys.** The same coefficient DP that
    bounds a grade also ranks the boards within it, so a grade can be a bare
    value array with no 8-byte keys at all. That is a win only where most boards
    in the grade are reachable -- at the 3-5% measured on 4x4 it is a large loss,
