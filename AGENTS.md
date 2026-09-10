@@ -9,6 +9,9 @@ helpers alongside.
 - `scripts/bundle-vanilla-2048.py`: folds that demo into one self-contained page
   for publishing as an Artifact, with `--bench` adding the state-loading strip
   in `scripts/bench/`
+- `scripts/solve-2048.c`: the exhaustive solver behind
+  `docs/2048-perfect-play.md`, built by hand when a number in that note needs
+  rechecking; not part of any recipe
 - `tests/`: stdlib-only tests (Python `unittest`, Node's built-in runner);
   demo dependencies are loaded by the browser, not installed here
 

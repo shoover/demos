@@ -18,3 +18,5 @@ numbers behind a decision outlive the conversation they were taken in.
 
 - [Saving vanilla-2048 more often than every five
   seconds](docs/vanilla-2048-per-move-saves.md)
+- [Solving 2048 exactly, and what a 4x4 solve would
+  cost](docs/2048-perfect-play.md)
