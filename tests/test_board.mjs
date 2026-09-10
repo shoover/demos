@@ -13,7 +13,10 @@ import {
   Game,
   LEGACY_STATE_VERSION,
   TIMELINE_ONLY_STATE_VERSION,
-  SIZE,
+  DEFAULT_SIZE,
+  MINI_SIZE,
+  SIZELESS_STATE_VERSION,
+  emptyBoard,
   STATE_VERSION,
   SaveError,
   TIMELINE_LIMIT,
@@ -40,11 +43,12 @@ const bestsOf = (game) => ({ best: game.best, replayedBest: game.replayedBest })
 const fixedRandom = () => 0;
 
 /** A Game with deterministic spawns, optionally starting from a fixed board. */
-function newGame(cells = null, best = HUGE_BEST, bestTile = 0) {
+function newGame(cells = null, best = HUGE_BEST, bestTile = 0, size = DEFAULT_SIZE) {
   // 0 picks the first empty cell but would also roll a 4, so the value roll is
   // answered separately: cell choice first, then the spawn value.
   let call = 0;
   const game = new Game({
+    size: cells === null ? size : cells.length,
     best,
     bestTile,
     random: () => (call++ % 2 === 0 ? 0 : 0.99),
@@ -146,18 +150,32 @@ test("sources name the input tiles behind each output tile", () => {
   assert.deepEqual(sources, [[1, 2], [3]]);
 });
 
-test("every direction covers the board exactly once", () => {
-  for (const direction of ["up", "down", "left", "right"]) {
-    const cells = lineCoordinates(direction).flat();
-    assert.deepEqual([...cells].sort((a, b) => a - b), [...Array(SIZE * SIZE).keys()]);
+test("every direction covers the board exactly once, at either size", () => {
+  for (const size of [DEFAULT_SIZE, MINI_SIZE]) {
+    for (const direction of ["up", "down", "left", "right"]) {
+      const cells = lineCoordinates(direction, size).flat();
+      assert.deepEqual([...cells].sort((a, b) => a - b), [...Array(size * size).keys()]);
+    }
   }
 });
 
 test("each line is ordered from the edge tiles collapse toward", () => {
-  assert.deepEqual(lineCoordinates("left")[0], [0, 1, 2, 3]);
-  assert.deepEqual(lineCoordinates("right")[0], [3, 2, 1, 0]);
-  assert.deepEqual(lineCoordinates("up")[0], [0, 4, 8, 12]);
-  assert.deepEqual(lineCoordinates("down")[0], [12, 8, 4, 0]);
+  assert.deepEqual(lineCoordinates("left", DEFAULT_SIZE)[0], [0, 1, 2, 3]);
+  assert.deepEqual(lineCoordinates("right", DEFAULT_SIZE)[0], [3, 2, 1, 0]);
+  assert.deepEqual(lineCoordinates("up", DEFAULT_SIZE)[0], [0, 4, 8, 12]);
+  assert.deepEqual(lineCoordinates("down", DEFAULT_SIZE)[0], [12, 8, 4, 0]);
+});
+
+test("a mini line is three cells, ordered the same way", () => {
+  assert.deepEqual(lineCoordinates("left", MINI_SIZE)[0], [0, 1, 2]);
+  assert.deepEqual(lineCoordinates("right", MINI_SIZE)[0], [2, 1, 0]);
+  assert.deepEqual(lineCoordinates("up", MINI_SIZE)[0], [0, 3, 6]);
+  assert.deepEqual(lineCoordinates("down", MINI_SIZE)[2], [8, 5, 2]);
+});
+
+test("a line collapses back to its own length", () => {
+  assert.deepEqual(compressAndMerge([2, 2, 0]).merged, [4, 0, 0]);
+  assert.deepEqual(compressAndMerge([0, 0, 4]).merged, [4, 0, 0]);
 });
 
 test("a move slides, merges, scores, and spawns", () => {
@@ -179,7 +197,7 @@ test("a move slides, merges, scores, and spawns", () => {
     result.slidingTiles.map(({ value, from, to }) => [value, from, to]),
     [[2, 0, 0], [2, 1, 0]]
   );
-  assert.equal(emptyCells(game.cells).length, SIZE * SIZE - 2);
+  assert.equal(emptyCells(game.cells).length, DEFAULT_SIZE * DEFAULT_SIZE - 2);
 });
 
 test("a move that changes nothing is rejected", () => {
@@ -237,7 +255,7 @@ test("a new game starts from two tiles", () => {
   const game = newGame();
   const spawned = game.reset();
   assert.equal(spawned.length, 2);
-  assert.equal(emptyCells(game.cells).length, SIZE * SIZE - 2);
+  assert.equal(emptyCells(game.cells).length, DEFAULT_SIZE * DEFAULT_SIZE - 2);
   assert.equal(game.score, 0);
   assert.equal(game.moves, 0);
   assert.equal(game.gameOver, false);
@@ -1256,4 +1274,160 @@ test("a long game costs about a byte a move to record", () => {
   const logBytes = stored.spawns.length;
   assert.ok(logBytes < game.moves * 1.4, `log is ${logBytes / game.moves} bytes a move`);
   assert.ok(timelineBytes > logBytes * 50, "the log should be far smaller than the boards");
+});
+
+/* Mini board ---------------------------------------------------------------- */
+
+/** A mini game with deterministic spawns, from a fixed 3x3 board. */
+const newMiniGame = (cells) => newGame(cells, HUGE_BEST, 0, MINI_SIZE);
+
+test("a mini game deals onto a three-a-side board", () => {
+  const game = new Game({ size: MINI_SIZE });
+  game.reset();
+  assert.equal(game.cells.length, MINI_SIZE);
+  assert.ok(game.cells.every((row) => row.length === MINI_SIZE));
+  assert.equal(emptyCells(game.cells).length, MINI_SIZE * MINI_SIZE - 2);
+});
+
+test("a mini board collapses by the same rules", () => {
+  const game = newMiniGame([
+    [2, 2, 4],
+    [0, 0, 0],
+    [0, 0, 0],
+  ]);
+  const result = game.move("left");
+  assert.notEqual(result, null);
+  // The 2s merge and the 4 slides in behind them; the trailing 2 is the tile the move
+  // earned, which this game's fixed spawn drops on the first empty cell.
+  assert.deepEqual(game.cells[0], [4, 4, 2]);
+  assert.deepEqual([...result.mergedCells], [0]);
+  assert.equal(game.score, 4);
+});
+
+test("a mini board is over when nine cells hold no move", () => {
+  const game = newMiniGame([
+    [2, 4, 2],
+    [4, 2, 4],
+    [2, 4, 2],
+  ]);
+  assert.equal(boardCanMove(game.cells), false);
+  assert.equal(game.move("left"), null);
+});
+
+test("a mini game says its size in its save, and round-trips", () => {
+  const played = newMiniGame([
+    [2, 2, 0],
+    [0, 0, 0],
+    [0, 0, 0],
+  ]);
+  played.move("left");
+  const encoded = played.encode(4);
+  assert.equal(JSON.parse(encoded).size, MINI_SIZE);
+
+  const saved = decodeSavedState(encoded, { ...bestsOf(played), size: MINI_SIZE });
+  assert.equal(saved.size, MINI_SIZE);
+  const restored = new Game({ size: MINI_SIZE, ...bestsOf(played) });
+  restored.restore(saved);
+  assert.deepEqual(restored.cells, played.cells);
+  assert.equal(restored.score, played.score);
+});
+
+test("a save written before board sizes reads back as a 4x4 game", () => {
+  const sizeless = JSON.stringify({
+    version: SIZELESS_STATE_VERSION,
+    timeline: [savedState()],
+    history: historyFor([savedState()]),
+    cursor: 0,
+    play_seconds: 1,
+  });
+  const saved = decodeSavedState(sizeless, BESTS);
+  assert.equal(saved.size, DEFAULT_SIZE);
+  assert.equal(saved.timeline[0].cells.length, DEFAULT_SIZE);
+});
+
+test("a save read at the wrong size is refused rather than reshaped", () => {
+  const mini = newMiniGame([
+    [2, 2, 0],
+    [0, 0, 0],
+    [0, 0, 0],
+  ]);
+  mini.move("left");
+  assert.throws(
+    () => decodeSavedState(mini.encode(1), { ...bestsOf(mini), size: DEFAULT_SIZE }),
+    SaveError
+  );
+  assert.throws(
+    () => decodeSavedState(encoded(), { ...BESTS, size: MINI_SIZE }),
+    SaveError
+  );
+});
+
+test("a save naming a board size the rules do not have is refused", () => {
+  assert.throws(() => decodeSavedState(encoded({ size: 5 }), BESTS), SaveError);
+  assert.throws(() => decodeSavedState(encoded({ size: "4" }), BESTS), SaveError);
+});
+
+test("a mini save restored into a 4x4 game is refused", () => {
+  const mini = newMiniGame([
+    [2, 2, 0],
+    [0, 0, 0],
+    [0, 0, 0],
+  ]);
+  mini.move("left");
+  const saved = decodeSavedState(mini.encode(1), { ...bestsOf(mini), size: MINI_SIZE });
+  assert.throws(() => new Game().restore(saved), SaveError);
+});
+
+test("a board size the rules do not have is a bug, not a save fault", () => {
+  assert.throws(() => new Game({ size: 5 }), Error);
+  assert.throws(() => new Game({ size: 2 }), Error);
+});
+
+test("a mini game replays from its log, move for move", () => {
+  const played = new Game({ size: MINI_SIZE, best: HUGE_BEST });
+  played.reset();
+  for (const direction of ["left", "up", "right", "down", "left", "up"]) {
+    played.move(direction);
+  }
+  const rebuilt = replaySpawns(played.spawns, MINI_SIZE);
+  assert.equal(rebuilt.size, MINI_SIZE);
+  assert.equal(rebuilt.latest.moves, played.latest.moves);
+  assert.equal(rebuilt.latest.score, played.latest.score);
+  assert.deepEqual(rebuilt.latest.cells, played.latest.cells);
+});
+
+test("a 4x4 log replayed on a mini board deals off the end and is refused", () => {
+  const played = new Game({ best: HUGE_BEST });
+  played.reset();
+  // Far enough that some tile has landed on a cell past 8, which is the whole point:
+  // those cells exist on the board it was played on and not on the one it is being
+  // replayed against.
+  for (const direction of ["left", "up", "right", "down", "left", "up", "right", "down"]) {
+    played.move(direction);
+  }
+  assert.ok(played.spawns.some((byte) => ((byte >> 1) & 0b1111) > 8));
+  assert.throws(() => replaySpawns(played.spawns, MINI_SIZE), SaveError);
+});
+
+test("a mini game takes moves back the way any game does", () => {
+  const game = newMiniGame([
+    [2, 2, 0],
+    [0, 0, 0],
+    [0, 0, 0],
+  ]);
+  game.move("left");
+  game.move("up");
+  const before = game.timeline.length;
+  assert.equal(game.playFrom(game.timeline.length - 2), 1);
+  assert.equal(game.timeline.length, before - 1);
+  assert.equal(game.replayed, true);
+});
+
+test("emptyBoard builds the size it is asked for", () => {
+  assert.deepEqual(emptyBoard(MINI_SIZE), [
+    [0, 0, 0],
+    [0, 0, 0],
+    [0, 0, 0],
+  ]);
+  assert.equal(emptyBoard(DEFAULT_SIZE).length, DEFAULT_SIZE);
 });

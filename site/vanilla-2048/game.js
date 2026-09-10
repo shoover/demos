@@ -3,11 +3,22 @@
  * board.js holds the rules and knows nothing about any of this.
  */
 
-import { SIZE, Game, SaveError, decodeSavedState, replaySpawns, topTileOf } from "./board.js";
+import {
+  DEFAULT_SIZE,
+  MINI_SIZE,
+  SIZES,
+  Game,
+  SaveError,
+  decodeSavedState,
+  replaySpawns,
+  topTileOf,
+} from "./board.js";
 import { abbreviate, count, formatDuration, scoreLine, scoreTitle } from "./format.js";
 import { binGame } from "./stats.js";
 import {
   ArchiveError,
+  MILESTONE_TILES,
+  MINI_MILESTONE_TILES,
   ENDED_DISCARDED,
   ENDED_GAME_OVER,
   ENDED_PLAYING,
@@ -19,9 +30,25 @@ import {
   gameTrend,
   isClean,
   isPlaying,
+  isSize,
   milestones,
   summarize,
 } from "./archive.js";
+
+/**
+ * What a stored key is called for a board of `size`.
+ *
+ * The 4x4 keys are the ones that were always there, unsuffixed, so every figure and
+ * every game already in a browser keeps the name it was written under -- and keeps its
+ * meaning with it, since all of them were played on four. Mini gets its own suffixed set
+ * beside them.
+ *
+ * A key set per size rather than a size field inside each record, because the size is
+ * what a reader has to know *before* it can read: the save's boards are validated
+ * against it, and a key that says which game it holds is the cheapest way to know. It is
+ * also what lets both games exist at once, which is what makes the toggle free to press.
+ */
+const sized = (key, size) => (size === DEFAULT_SIZE ? key : `${key}.mini`);
 
 const BEST_SCORE_KEY = "vanilla-2048.bestScore";
 // The best score reached in a game that was played on from an earlier state. A separate
@@ -35,6 +62,9 @@ const BEST_REPLAYED_SCORE_KEY = "vanilla-2048.bestReplayedScore";
 const BEST_TILE_KEY = "vanilla-2048.bestTile";
 const BEST_REPLAYED_TILE_KEY = "vanilla-2048.bestReplayedTile";
 const GAME_STATE_KEY = "vanilla-2048.gameState.v1";
+// Which board the page opens on. Its own key, beside the two saves rather than inside
+// either: it is not a fact about a game, it is which game was last being played.
+const BOARD_SIZE_KEY = "vanilla-2048.boardSize";
 
 const SLIDE_MS = 100;
 // The burst a tile makes on arrival, at the imgui demo's numbers: it keeps these as two
@@ -73,6 +103,14 @@ const MIN_CELL = 36;
 const DESKTOP_GAP = 8;
 const COMPACT_GAP = 6;
 
+// The widest the board itself is drawn, which is what the cell above works out to on a
+// full-size 4x4 board. It is the board that is capped and not the cell, so mini draws
+// bigger cells in the same frame rather than a smaller board in the same cells: the play
+// area is the thing a player is looking at, and it has no business shrinking by a
+// quarter because there is one column fewer in it.
+const MAX_BOARD = MAX_CELL * DEFAULT_SIZE + DESKTOP_GAP * (DEFAULT_SIZE - 1);
+const maxCellFor = (size, gap) => Math.floor((MAX_BOARD - gap * (size - 1)) / size);
+
 const GAME_OVER_MESSAGE = "No moves left. Press R or New Game.";
 
 // Which way the board moved, in cells, for the nudge the indicator arrives with.
@@ -96,6 +134,8 @@ const elements = {
   overlay: document.getElementById("overlay"),
   nextMove: document.getElementById("next-move"),
   newGame: document.getElementById("new-game"),
+  mini: document.getElementById("mini"),
+  share: document.getElementById("share"),
   newGameConfirm: document.getElementById("new-game-confirm"),
   confirmNewGame: document.getElementById("confirm-new-game"),
   undo: document.getElementById("undo"),
@@ -206,13 +246,24 @@ function loadBest(key, name) {
  */
 function saveBests() {
   storage.setItem(
-    game.replayed ? BEST_REPLAYED_SCORE_KEY : BEST_SCORE_KEY,
+    sized(game.replayed ? BEST_REPLAYED_SCORE_KEY : BEST_SCORE_KEY, game.size),
     String(game.ownBest)
   );
   storage.setItem(
-    game.replayed ? BEST_REPLAYED_TILE_KEY : BEST_TILE_KEY,
+    sized(game.replayed ? BEST_REPLAYED_TILE_KEY : BEST_TILE_KEY, game.size),
     String(game.ownBestTile)
   );
+}
+
+/**
+ * The board size the page opens on, which is whichever one it was last left on.
+ *
+ * A stored value that is not a size the rules offer is not a mode to guess at: it opens
+ * on the classic board, which is what a browser that has never been here does.
+ */
+function loadBoardSize() {
+  const stored = Number(storage.getItem(BOARD_SIZE_KEY));
+  return SIZES.includes(stored) ? stored : DEFAULT_SIZE;
 }
 
 /* Archive ------------------------------------------------------------------- */
@@ -277,12 +328,12 @@ function markGameStarted() {
     return;
   }
   currentGameStarted = Date.now();
-  storage.setItem(CURRENT_GAME_STARTED_KEY, String(currentGameStarted));
+  storage.setItem(sized(CURRENT_GAME_STARTED_KEY, game.size), String(currentGameStarted));
 }
 
 /** The stored start time of the game in progress, or null where there is none. */
-function loadGameStarted() {
-  const value = storage.getItem(CURRENT_GAME_STARTED_KEY);
+function loadGameStarted(size) {
+  const value = storage.getItem(sized(CURRENT_GAME_STARTED_KEY, size));
   if (value === null) {
     return null;
   }
@@ -485,6 +536,7 @@ function archiveGame() {
     seconds: playTime.elapsed(),
     replayedFrom: game.replayedFrom,
     recorded: game.spawns !== null,
+    size: game.size,
   });
   archive = addGame(archive, row);
   persistArchive();
@@ -566,7 +618,10 @@ const saver = {
   save(game, playSeconds) {
     const startedAt = performance.now();
     const serialized = game.encode(playSeconds);
-    storage.setItem(GAME_STATE_KEY, serialized);
+    // The game's own slot, which is the game's own business: a mini game and a 4x4 game
+    // are both in progress as far as storage is concerned, and only one of them is on
+    // the board.
+    storage.setItem(sized(GAME_STATE_KEY, game.size), serialized);
     this.latencies.push(performance.now() - startedAt);
     if (this.latencies.length > SAVE_LATENCY_CAPACITY) {
       this.latencies.shift();
@@ -695,6 +750,9 @@ const frameTiming = {
 
 let cellSize = MAX_CELL;
 let gapSize = DESKTOP_GAP;
+// The size the board is currently drawn at, so a mode switch redraws the grid even when
+// the cell arithmetic happens to land on the same number.
+let drawnSize = DEFAULT_SIZE;
 
 function tileClass(value) {
   return value > 2048 ? "beyond" : `v${value}`;
@@ -721,8 +779,10 @@ function tileElement(value, cell) {
   return element;
 }
 
-const rowOf = (cell) => Math.floor(cell / SIZE);
-const colOf = (cell) => cell % SIZE;
+// Off the live game rather than a constant: there is one board on the page, and how
+// wide it is is a property of the game being played on it.
+const rowOf = (cell) => Math.floor(cell / game.size);
+const colOf = (cell) => cell % game.size;
 
 /** Board position of a tile, in fractional cells so a slide can stop between them. */
 function translation(row, col) {
@@ -754,13 +814,31 @@ function burstScale(kind, t) {
 // element the repaint is about to drop.
 let bursts = [];
 
+/**
+ * Lay out the empty cells the tiles are drawn over, one per cell of the live board.
+ *
+ * Rebuilt when the board changes size rather than built once at startup: the grid is the
+ * one part of the board that is markup rather than paint, so it is the one part a mode
+ * switch has to make again. The CSS column count comes from --size, which resizeBoard
+ * sets beside the cell and gap.
+ */
+function paintGrid() {
+  elements.grid.replaceChildren(
+    ...Array.from({ length: game.size * game.size }, () => {
+      const cell = document.createElement("div");
+      cell.className = "cell";
+      return cell;
+    })
+  );
+}
+
 /** Paint the board as it now stands, bursting merges and springing in new tiles. */
 function paintSettled({ merged = new Set(), appeared = new Set() } = {}) {
   const startedAt = performance.now();
   const tiles = [];
   bursts = [];
 
-  for (let cell = 0; cell < SIZE * SIZE; cell += 1) {
+  for (let cell = 0; cell < game.size * game.size; cell += 1) {
     const value = game.cells[rowOf(cell)][colOf(cell)];
     if (!value) {
       continue;
@@ -1366,6 +1444,14 @@ const ARCHIVE_TRACKS = {
   replayed: (row) => !isClean(row),
 };
 let archiveTrack = "all";
+/**
+ * Which board the list is about. Follows the board being played rather than opening on
+ * everything, because "everything" is the one answer that is wrong here: a median across
+ * a mini game worth two thousand and a 4x4 game worth twenty describes neither of them,
+ * and the trend graph draws both into one score lane where every mini game reads as a
+ * collapse. The two sizes are two records; this says which one is being read.
+ */
+let archiveSize = DEFAULT_SIZE;
 // The game whose graph is open under the list, or null. Held by id rather than by row,
 // because the list it was picked from is rebuilt on every paint.
 let openedGame = null;
@@ -1449,7 +1535,10 @@ function archiveSummary(rows) {
  * happened, and the line is read for what has.
  */
 function archiveMilestones(rows) {
-  const reached = milestones(rows).filter((milestone) => milestone.games > 0);
+  // Mini's own thresholds when mini is what is being read. Nine cells cap how far a
+  // board can be stacked, so the classic funnel against mini games is a row of zeros.
+  const tiles = archiveSize === MINI_SIZE ? MINI_MILESTONE_TILES : MILESTONE_TILES;
+  const reached = milestones(rows, tiles).filter((milestone) => milestone.games > 0);
   if (reached.length === 0) {
     return "";
   }
@@ -1792,6 +1881,7 @@ function liveRow() {
     seconds: playTime.elapsed(),
     replayedFrom: game.replayedFrom,
     recorded: game.spawns !== null,
+    size: game.size,
   });
 }
 
@@ -1806,7 +1896,14 @@ function paintArchive() {
     return;
   }
   for (const button of elements.archiveTracks.querySelectorAll("button")) {
-    button.setAttribute("aria-pressed", String(button.dataset.track === archiveTrack));
+    button.setAttribute(
+      "aria-pressed",
+      String(
+        button.dataset.size === undefined
+          ? button.dataset.track === archiveTrack
+          : Number(button.dataset.size) === archiveSize
+      )
+    );
   }
 
   // The fault is shown where the list would have been, and says what to do about it: a
@@ -1833,13 +1930,16 @@ function paintArchive() {
     return;
   }
 
-  const stored = archive.filter(ARCHIVE_TRACKS[archiveTrack]);
+  const stored = archive.filter(
+    (row) => isSize(archiveSize)(row) && ARCHIVE_TRACKS[archiveTrack](row)
+  );
   // The game on the board joins the list and the graph but stays out of the figures.
   // Those are readings of games that are over -- a median taken over a game twenty moves
   // in is a median of something that has not happened yet -- and the played line says
   // the live game is there rather than quietly folding it in.
   const live = liveRow();
-  const showLive = live !== null && ARCHIVE_TRACKS[archiveTrack](live);
+  const showLive =
+    live !== null && isSize(archiveSize)(live) && ARCHIVE_TRACKS[archiveTrack](live);
   const rows = showLive ? [live, ...stored] : stored;
 
   const [played, scored] = archiveSummary(stored);
@@ -1858,10 +1958,11 @@ function paintArchive() {
     // not the same absence, and only one of them is fixed by playing a game.
     const nothing = document.createElement("p");
     nothing.className = "archive-empty";
+    const board = `${archiveSize}x${archiveSize}`;
     nothing.textContent =
       archive.length === 0
         ? "No finished games yet. A game joins this list when it ends or is discarded."
-        : `No ${archiveTrack} games yet.`;
+        : `No ${archiveTrack === "all" ? "" : `${archiveTrack} `}${board} games yet.`;
     elements.archiveList.replaceChildren(nothing);
     elements.archiveTrend.hidden = true;
     elements.archiveTrendReadout.textContent = "";
@@ -1953,7 +2054,7 @@ async function openArchivedGame(id) {
 
   let rebuilt;
   try {
-    rebuilt = replaySpawns(record.spawns);
+    rebuilt = replaySpawns(record.spawns, row.n);
   } catch (error) {
     if (!(error instanceof SaveError)) {
       throw error;
@@ -2111,16 +2212,18 @@ function resizeBoard() {
   const target = Math.min(availableWidth, availableHeight);
   const cell = Math.max(
     MIN_CELL,
-    Math.min(MAX_CELL, Math.floor((target - gap * (SIZE - 1)) / SIZE))
+    Math.min(maxCellFor(game.size, gap), Math.floor((target - gap * (game.size - 1)) / game.size))
   );
-  if (cell === cellSize && gap === gapSize) {
+  if (cell === cellSize && gap === gapSize && game.size === drawnSize) {
     return;
   }
 
   cellSize = cell;
   gapSize = gap;
+  drawnSize = game.size;
   document.documentElement.style.setProperty("--cell", `${cell}px`);
   document.documentElement.style.setProperty("--gap", `${gap}px`);
+  document.documentElement.style.setProperty("--size", String(game.size));
   landSlide();
   paintSettled();
 }
@@ -2232,16 +2335,16 @@ function requestNewGame() {
   setConfirmOpen(elements.newGameConfirm.hidden);
 }
 
-function startNewGame() {
+function startNewGame(message = "New game.") {
   // Before the board is thrown away, since it is what the row is made of. A game with no
   // moves on it files nothing, which is what makes this safe to call from startup.
   archiveGame();
   currentGameId = newGameId();
-  storage.setItem(CURRENT_GAME_KEY, currentGameId);
+  storage.setItem(sized(CURRENT_GAME_KEY, game.size), currentGameId);
   // Cleared rather than set: this game has not been played yet, and markGameStarted
   // stamps it on the move that changes that.
   currentGameStarted = null;
-  storage.removeItem(CURRENT_GAME_STARTED_KEY);
+  storage.removeItem(sized(CURRENT_GAME_STARTED_KEY, game.size));
   const spawned = game.reset();
   slide = null;
   lastMoveAt = -Infinity;
@@ -2251,7 +2354,7 @@ function startNewGame() {
   setConfirmOpen(false);
   // Just the news: the line it is standing in already says how to play, and saying it
   // again in fewer words would be the one thing this message costs.
-  repaint({ appeared: new Set(spawned) }, "New game.");
+  repaint({ appeared: new Set(spawned) }, message);
   // The clock starts over with the board rather than carrying the last game's seconds
   // across; commitChange picks the zero straight back up.
   playTime.set(0, false);
@@ -2620,10 +2723,26 @@ elements.archiveTrend.addEventListener("pointerleave", () => {
 
 elements.archiveTracks.addEventListener("click", (event) => {
   const button = event.target instanceof Element ? event.target.closest("button") : null;
-  if (button === null || button.dataset.track === archiveTrack) {
+  if (button === null) {
     return;
   }
-  archiveTrack = button.dataset.track;
+  // Two filters on one row, told apart by which attribute the button carries: a track,
+  // or a board. They are independent -- the list is whatever satisfies both -- so a
+  // press sets one of them and leaves the other where it was.
+  if (button.dataset.size !== undefined) {
+    if (Number(button.dataset.size) === archiveSize) {
+      return;
+    }
+    archiveSize = Number(button.dataset.size);
+    // The open game belongs to the list that was showing, and the size it was rebuilt
+    // at came off its own row -- but the row is about to leave the list.
+    closeArchivedGame();
+  } else {
+    if (button.dataset.track === archiveTrack) {
+      return;
+    }
+    archiveTrack = button.dataset.track;
+  }
   paintArchive();
 });
 
@@ -2700,6 +2819,12 @@ document.addEventListener("pointerdown", (event) => {
   dismissingPress = dismissed;
 });
 elements.newGame.addEventListener("click", requestNewGame);
+// The board, switched. Nothing is asked first because nothing is lost: the game being
+// left is saved under its own key on the way out, which is what switchBoard does before
+// it opens the other one.
+onPress(elements.mini, () =>
+  switchBoard(game.size === MINI_SIZE ? DEFAULT_SIZE : MINI_SIZE)
+);
 elements.confirmNewGame.addEventListener("click", startNewGame);
 document
   .getElementById("resume-game")
@@ -2741,10 +2866,10 @@ function paintedColor(className) {
 
 function drawShareBoard(context, x, y) {
   const step = SHARE_CELL + SHARE_TILE_GAP;
-  for (let cell = 0; cell < SIZE * SIZE; cell += 1) {
-    const value = game.cells[Math.floor(cell / SIZE)][cell % SIZE];
-    const left = x + (cell % SIZE) * step;
-    const top = y + Math.floor(cell / SIZE) * step;
+  for (let cell = 0; cell < game.size * game.size; cell += 1) {
+    const value = game.cells[rowOf(cell)][colOf(cell)];
+    const left = x + colOf(cell) * step;
+    const top = y + rowOf(cell) * step;
 
     context.fillStyle = value
       ? paintedColor(`tile-face ${tileClass(value)}`)
@@ -2781,7 +2906,7 @@ function drawShareBoard(context, x, y) {
  * shared image cannot end up in a different face or size than the page it is of.
  */
 function renderShareImage() {
-  const boardSize = SHARE_CELL * SIZE + SHARE_TILE_GAP * (SIZE - 1);
+  const boardSize = SHARE_CELL * game.size + SHARE_TILE_GAP * (game.size - 1);
   const panelStyle = getComputedStyle(elements.scoreLine);
   const font = `${panelStyle.fontSize} ${panelStyle.fontFamily}`;
   const lineHeight = Math.round(parseFloat(panelStyle.fontSize) * 1.5);
@@ -2888,15 +3013,20 @@ async function share() {
  * A save the validator rejects is a permanent dead end on its own: every reload reads
  * the same bad key and fails the same way. Say what is wrong and offer the one action
  * that clears it, rather than discarding the save silently.
+ *
+ * `boardSizeInFault` is the slot that was being opened, and it is the only one this
+ * offers to clear: the other size's game is untouched by whatever is wrong with this
+ * one, and taking it down too would cost a game that was never in question.
  */
-function reportCorruptState(reason) {
+function reportCorruptState(reason, boardSizeInFault) {
   const heading = document.createElement("strong");
   heading.textContent = "Saved game was corrupt.";
   const detail = document.createElement("small");
   detail.textContent = reason;
   const consequence = document.createElement("small");
   consequence.textContent =
-    "Starting fresh discards the saved game, the best scores and the best tiles.";
+    "Starting fresh discards the saved game, the best scores and the best tiles " +
+    `for the ${boardSizeInFault}x${boardSizeInFault} board.`;
   const button = document.createElement("button");
   button.type = "button";
   button.textContent = "Start fresh";
@@ -2904,11 +3034,15 @@ function reportCorruptState(reason) {
     // All of them: the saved score is validated against whichever best score its game
     // was scoring into, so clearing one and keeping the others is how this state is
     // reached in the first place.
-    storage.removeItem(GAME_STATE_KEY);
-    storage.removeItem(BEST_SCORE_KEY);
-    storage.removeItem(BEST_REPLAYED_SCORE_KEY);
-    storage.removeItem(BEST_TILE_KEY);
-    storage.removeItem(BEST_REPLAYED_TILE_KEY);
+    for (const key of [
+      GAME_STATE_KEY,
+      BEST_SCORE_KEY,
+      BEST_REPLAYED_SCORE_KEY,
+      BEST_TILE_KEY,
+      BEST_REPLAYED_TILE_KEY,
+    ]) {
+      storage.removeItem(sized(key, boardSizeInFault));
+    }
     location.reload();
   });
 
@@ -2931,20 +3065,31 @@ function reportCorruptState(reason) {
 // stand-in is what the frame loop reads if one of those figures is itself rejected.
 let game = new Game();
 
-function restoreGame() {
-  game = new Game({
-    best: loadBest(BEST_SCORE_KEY, "best score"),
-    replayedBest: loadBest(BEST_REPLAYED_SCORE_KEY, "replayed best score"),
-    bestTile: loadBest(BEST_TILE_KEY, "best tile"),
-    replayedBestTile: loadBest(BEST_REPLAYED_TILE_KEY, "replayed best tile"),
+/** An empty game of `size`, carrying that size's own stored best figures. */
+function gameFor(size) {
+  return new Game({
+    size,
+    best: loadBest(sized(BEST_SCORE_KEY, size), "best score"),
+    replayedBest: loadBest(sized(BEST_REPLAYED_SCORE_KEY, size), "replayed best score"),
+    bestTile: loadBest(sized(BEST_TILE_KEY, size), "best tile"),
+    replayedBestTile: loadBest(sized(BEST_REPLAYED_TILE_KEY, size), "replayed best tile"),
   });
-  const serialized = storage.getItem(GAME_STATE_KEY);
+}
+
+function restoreGame(size) {
+  game = gameFor(size);
+  const serialized = storage.getItem(sized(GAME_STATE_KEY, size));
   if (serialized === null) {
     return false;
   }
   // Only the scores bound the save. The tiles are read back off the boards it carries,
   // which is why they are not passed in: see Game.restore.
+  //
+  // The size goes in because the key this came out of is what says which game it is: a
+  // save under the mini key that holds a 4x4 board is not a 4x4 game to be opened, it is
+  // a save in the wrong place, and decodeSavedState says so.
   const saved = decodeSavedState(serialized, {
+    size,
     best: game.best,
     replayedBest: game.replayedBest,
   });
@@ -2952,9 +3097,9 @@ function restoreGame() {
   // A save from a build that did not keep one gets an id now rather than going without:
   // it names a game that is still being played, and the archive will want to file it
   // under something when it ends.
-  currentGameId = storage.getItem(CURRENT_GAME_KEY) ?? newGameId();
-  storage.setItem(CURRENT_GAME_KEY, currentGameId);
-  currentGameStarted = loadGameStarted();
+  currentGameId = storage.getItem(sized(CURRENT_GAME_KEY, size)) ?? newGameId();
+  storage.setItem(sized(CURRENT_GAME_KEY, size), currentGameId);
+  currentGameStarted = loadGameStarted(size);
   // The restore can raise a best tile -- off a save written before tiles were tracked at
   // all, whose stored figure is a zero the boards disprove -- and the next thing the
   // player does may be to start a new game, which discards the only board that proved
@@ -2965,21 +3110,37 @@ function restoreGame() {
   return true;
 }
 
-/** Restore or begin a game. False means startup stalled on a corrupt save. */
-function start() {
-  // Before either branch: startNewGame files the game it is replacing, and it has to be
-  // filed into the list as it actually stands rather than into an empty one.
-  loadArchive();
+/**
+ * Take up the game stored for `size`, or begin one. False means a corrupt save stopped it.
+ *
+ * Both the opening of the page and the mode toggle come through here, because they are
+ * the same act: there is a slot per size, and this is what opening one looks like.
+ * `prefix` is what the panel says about it afterwards.
+ */
+function openBoard(size, describe) {
   let restored;
   try {
-    restored = restoreGame();
+    restored = restoreGame(size);
   } catch (error) {
     if (!(error instanceof SaveError)) {
       throw error;
     }
-    reportCorruptState(error.message);
+    reportCorruptState(error.message, size);
     return false;
   }
+
+  storage.setItem(BOARD_SIZE_KEY, String(size));
+  elements.mini.setAttribute("aria-pressed", String(size === MINI_SIZE));
+  // The list follows the board: what is being played is what a player is asking the
+  // archive about. Either size is still one press away inside the panel.
+  archiveSize = size;
+  closeArchivedGame();
+  slide = null;
+  lastMoveAt = -Infinity;
+  // Everything in them belongs to the game just put down.
+  setTimelineOpen(false);
+  setConfirmOpen(false);
+  paintGrid();
 
   if (restored) {
     // A finished game that was never filed: the board locked, and the page went away
@@ -2998,15 +3159,54 @@ function start() {
     // learned from -- and the move it names is the one thing the mark cannot carry.
     repaint(
       undefined,
-      game.replayed
-        ? `Saved game restored, replayed from move ${count(game.replayedFrom)}.`
-        : "Saved game restored."
+      describe(
+        game.replayed
+          ? `restored, replayed from move ${count(game.replayedFrom)}`
+          : "restored"
+      )
     );
     saver.defer();
   } else {
-    startNewGame();
+    startNewGame(describe("new"));
   }
+  // After the board exists at its new size, since it is measured from what the panel
+  // leaves over and the grid it is measuring has just changed shape.
+  resizeBoard();
   return true;
+}
+
+/** Restore or begin a game. False means startup stalled on a corrupt save. */
+function start() {
+  // Before either branch: startNewGame files the game it is replacing, and it has to be
+  // filed into the list as it actually stands rather than into an empty one.
+  loadArchive();
+  return openBoard(loadBoardSize(), (state) =>
+    state === "new" ? "New game." : `Saved game ${state}.`
+  );
+}
+
+/**
+ * Switch boards: put this game down, take the other one up.
+ *
+ * Nothing is discarded and nothing is archived. Each size has its own save, so the game
+ * being left is written where it will be found again, and pressing back returns to the
+ * board exactly as it stands here -- score, timeline, clock and all. That is the whole
+ * argument for a slot per size: a mode that costs a game to look at does not get looked
+ * at.
+ *
+ * The game being put down is written outright rather than left to the interval, because
+ * the next thing to touch that key is a reload that must find it.
+ */
+function switchBoard(size) {
+  if (size === game.size || !acceptingInput) {
+    return;
+  }
+  landSlide();
+  saver.save(game, playTime.elapsed());
+  storeLiveRecord();
+  acceptingInput = openBoard(size, (state) =>
+    state === "new" ? `New ${size}x${size} game.` : `${size}x${size} board, game ${state}.`
+  );
 }
 
 function frame(now) {
@@ -3035,14 +3235,6 @@ function frame(now) {
 }
 
 let lastStatsPaint = 0;
-
-elements.grid.replaceChildren(
-  ...Array.from({ length: SIZE * SIZE }, () => {
-    const cell = document.createElement("div");
-    cell.className = "cell";
-    return cell;
-  })
-);
 
 paintHelp();
 compactMedia.addEventListener("change", () => {

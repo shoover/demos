@@ -7,23 +7,56 @@
  *
  * Cells are addressed two ways on purpose. The board itself is rows of rows, because
  * that is the shape the save format stores; everything a move reports back is a flat
- * index (r * SIZE + c), because callers only ever use those to key tiles and look up
+ * index (r * size + c), because callers only ever use those to key tiles and look up
  * positions.
+ *
+ * The board is square and can be four cells a side or three, and no function here holds
+ * that figure: a board carries its own size in the length of its rows, and the two that
+ * are handed no board are handed the size instead. That is not tidiness. An archived
+ * game is rebuilt from its moves while a live game of the other size sits on the board,
+ * so a size the rules read from one place would replay the one against the other.
  *
  * A game keeps every state it has been in, so an earlier board can be looked at again --
  * and played on from, which discards what it had already gone on to do; see the Game
  * class for how the timeline and the cursor into it fit together.
  */
 
-export const SIZE = 4;
-export const STATE_VERSION = 3;
+// The board sizes the rules are played on. The classic game is four cells a side;
+// mini is three, and nothing else about the rules changes with it -- same spawn odds,
+// same merge, same game-over test. A second board size is a smaller board, not a second
+// game, and tuning anything else here would make the two incomparable twice over.
+export const DEFAULT_SIZE = 4;
+export const MINI_SIZE = 3;
+export const SIZES = [DEFAULT_SIZE, MINI_SIZE];
+export const STATE_VERSION = 4;
 // Version 1 stored a single state, from before the game kept a timeline. Version 2 kept
 // the timeline but nothing behind it, so a graph could only ever show the moves the
 // timeline still held. Both are still read, so a game saved by a previous build reopens
 // rather than being called corrupt.
 export const LEGACY_STATE_VERSION = 1;
 export const TIMELINE_ONLY_STATE_VERSION = 2;
-const READABLE_VERSIONS = [STATE_VERSION, TIMELINE_ONLY_STATE_VERSION, LEGACY_STATE_VERSION];
+// Version 3 is every save written before a board could be any size but four. It carries
+// no size field, and what that means is not a default to guess at: there was one board
+// size, so a save without one is a 4x4 game.
+//
+// A version bump rather than a field added quietly beside the others, which is how
+// replayed_from and spawns went in. Those were safe to add because a reader that did not
+// know them still opened the game. A size an older reader ignored would send a 3x3 board
+// through a validator expecting four rows, fail, and put up the recovery overlay -- which
+// offers to discard the save and both best scores with it. "Unsupported version" is a
+// refusal; "corrupt" is a refusal that invites the player to throw away something that
+// was never wrong.
+export const SIZELESS_STATE_VERSION = 3;
+const READABLE_VERSIONS = [
+  STATE_VERSION,
+  SIZELESS_STATE_VERSION,
+  TIMELINE_ONLY_STATE_VERSION,
+  LEGACY_STATE_VERSION,
+];
+// The versions that carry a history of their own behind the timeline. Older saves keep
+// their undo tallies on the timeline's states, which is where they were before the
+// history existed to hold them.
+const HISTORY_VERSIONS = [STATE_VERSION, SIZELESS_STATE_VERSION];
 // Boards kept per game. The whole timeline is rewritten on every save, so it has to be
 // bounded by something. A full one measures 92 KB, which encodes in 0.6ms and stores in
 // 0.4ms -- a fraction of a frame on the move that writes it, and a fraction of the 5 MB
@@ -54,7 +87,8 @@ const DIRECTIONS = ["up", "down", "left", "right"];
  * Seven bits, laid out so the opening board and the moves can share an array:
  *
  *     bits 6-5  direction index into DIRECTIONS, unused (0) on an opening spawn
- *     bits 4-1  the cell the tile landed on, 0-15
+*     bits 4-1  the cell the tile landed on, 0-15 -- which is why a mini board needed
+ *               no new format: a 3x3 board addresses 0-8 and fits the field as it is
  *     bit  0    the tile dealt: 0 for a 2, 1 for a 4
  *
  * The first two entries are the two tiles reset() deals; entry 2 + n is move n + 1. So
@@ -154,24 +188,43 @@ function requireTile(value, name) {
 
 export const topTileOf = (cells) => Math.max(...cells.map((row) => Math.max(...row)));
 
-function validateSavedBoard(value) {
+// The one place a size has to be passed in rather than read off what is being worked
+// on: checking a board against the size its save claims is the whole job here.
+function validateSavedBoard(value, size) {
   if (
     !Array.isArray(value) ||
-    value.length !== SIZE ||
-    value.some((row) => !Array.isArray(row) || row.length !== SIZE) ||
+    value.length !== size ||
+    value.some((row) => !Array.isArray(row) || row.length !== size) ||
     value.some((row) => row.some((tile) => !isValidTile(tile)))
   ) {
-    throw new SaveError("Invalid saved 2048 board");
+    throw new SaveError(`Invalid saved 2048 board for a ${size}x${size} game`);
   }
   return value.map((row) => row.slice());
 }
 
+/** A board of `size` a side with nothing on it. */
+export function emptyBoard(size) {
+  return Array.from({ length: size }, () => new Array(size).fill(0));
+}
+
+/**
+ * The size of a board, read off the board.
+ *
+ * Cells are addressed flat, so nearly everything here needs the row length to divide by
+ * -- and a board is rows of rows, so it already carries it. Taking the size from the
+ * board rather than from a parameter is what lets an archived mini game be rebuilt while
+ * a 4x4 game is on screen: the two never have to agree, because neither is asking a
+ * module-level constant which size the game is.
+ */
+export const sizeOf = (cells) => cells.length;
+
 export function emptyCells(cells) {
+  const size = sizeOf(cells);
   const empty = [];
-  for (let r = 0; r < SIZE; r += 1) {
-    for (let c = 0; c < SIZE; c += 1) {
+  for (let r = 0; r < size; r += 1) {
+    for (let c = 0; c < size; c += 1) {
       if (cells[r][c] === 0) {
-        empty.push(r * SIZE + c);
+        empty.push(r * size + c);
       }
     }
   }
@@ -179,16 +232,17 @@ export function emptyCells(cells) {
 }
 
 export function boardCanMove(cells) {
-  for (let r = 0; r < SIZE; r += 1) {
-    for (let c = 0; c < SIZE; c += 1) {
+  const size = sizeOf(cells);
+  for (let r = 0; r < size; r += 1) {
+    for (let c = 0; c < size; c += 1) {
       const value = cells[r][c];
       if (value === 0) {
         return true;
       }
-      if (r + 1 < SIZE && value === cells[r + 1][c]) {
+      if (r + 1 < size && value === cells[r + 1][c]) {
         return true;
       }
-      if (c + 1 < SIZE && value === cells[r][c + 1]) {
+      if (c + 1 < size && value === cells[r][c + 1]) {
         return true;
       }
     }
@@ -202,15 +256,15 @@ export function boardCanMove(cells) {
  * Sliding needs each tile's origin and destination, so every direction is expressed
  * as an ordered list of cell indices and collapsed by one shared loop.
  */
-export function lineCoordinates(direction) {
+export function lineCoordinates(direction, size) {
   const lines = [];
-  for (let line = 0; line < SIZE; line += 1) {
+  for (let line = 0; line < size; line += 1) {
     const cells = [];
-    for (let step = 0; step < SIZE; step += 1) {
+    for (let step = 0; step < size; step += 1) {
       const forward = direction === "left" || direction === "up";
-      const offset = forward ? step : SIZE - 1 - step;
+      const offset = forward ? step : size - 1 - step;
       const horizontal = direction === "left" || direction === "right";
-      cells.push(horizontal ? line * SIZE + offset : offset * SIZE + line);
+      cells.push(horizontal ? line * size + offset : offset * size + line);
     }
     lines.push(cells);
   }
@@ -251,7 +305,9 @@ export function compressAndMerge(line) {
       i += 1;
     }
   }
-  while (merged.length < SIZE) {
+  // Back to the length it came in at: a line is as long as the board is wide, and the
+  // line itself is the only thing here that knows how wide that is.
+  while (merged.length < line.length) {
     merged.push(0);
   }
   return { merged, mergePositions, sources, gained };
@@ -277,22 +333,23 @@ export function arrivalCells(previous, direction, cells) {
     return { merged, appeared };
   }
 
-  const collapsed = Game.emptyBoard();
-  for (const coordinates of lineCoordinates(direction)) {
+  const size = sizeOf(previous);
+  const collapsed = emptyBoard(size);
+  for (const coordinates of lineCoordinates(direction, size)) {
     const line = coordinates.map(
-      (cell) => previous[Math.floor(cell / SIZE)][cell % SIZE]
+      (cell) => previous[Math.floor(cell / size)][cell % size]
     );
     const { merged: values, mergePositions } = compressAndMerge(line);
     coordinates.forEach((cell, index) => {
-      collapsed[Math.floor(cell / SIZE)][cell % SIZE] = values[index];
+      collapsed[Math.floor(cell / size)][cell % size] = values[index];
     });
     for (const index of mergePositions) {
       merged.add(coordinates[index]);
     }
   }
 
-  for (let cell = 0; cell < SIZE * SIZE; cell += 1) {
-    const [row, col] = [Math.floor(cell / SIZE), cell % SIZE];
+  for (let cell = 0; cell < size * size; cell += 1) {
+    const [row, col] = [Math.floor(cell / size), cell % size];
     if (collapsed[row][col] === 0 && cells[row][col] !== 0) {
       appeared.add(cell);
     }
@@ -347,12 +404,12 @@ function historyEntry(moves, score, undos = 0) {
  * are one move apart and a move never loses points, so a timeline that skips or runs
  * backwards is corrupt however plausible each state looks on its own.
  */
-function decodeState(entry, best, previous) {
+function decodeState(entry, best, previous, size) {
   if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
     throw new SaveError("Invalid saved 2048 game state");
   }
 
-  const cells = validateSavedBoard(entry.board);
+  const cells = validateSavedBoard(entry.board, size);
   const score = requireNonNegativeInt(entry.score, "score");
   const moves = requireNonNegativeInt(entry.moves, "move count");
   const gameOver = entry.game_over;
@@ -419,7 +476,7 @@ function savedStates(state) {
  * here on is recorded.
  */
 function decodeHistory(state, timeline) {
-  if (state.version !== STATE_VERSION) {
+  if (!HISTORY_VERSIONS.includes(state.version)) {
     // A version 2 save kept its undo tallies on the timeline's states, which is where
     // they were before they had anywhere better to be. Read them off the stored entries
     // rather than off the decoded states, which no longer carry them.
@@ -495,8 +552,13 @@ function decodeHistory(state, timeline) {
  * Returns the whole timeline, which of its states was being viewed, where play was last
  * resumed from, and how often it has been taken back -- the scrub position, the replay
  * point and the undo tallies are all part of what a reload has to put back.
+ *
+ * `size` is the board size the caller is expecting, which it knows before it reads a
+ * character: each size is saved under its own key, so the key that was opened says which
+ * game this is. A save that declares a different one is not a game of another size to be
+ * accommodated -- it is a save under the wrong key, which is corruption.
  */
-export function decodeSavedState(serialized, { best, replayedBest }) {
+export function decodeSavedState(serialized, { best, replayedBest, size = DEFAULT_SIZE }) {
   let state;
   try {
     state = JSON.parse(serialized);
@@ -509,6 +571,18 @@ export function decodeSavedState(serialized, { best, replayedBest }) {
   }
   if (!READABLE_VERSIONS.includes(state.version)) {
     throw new SaveError("Unsupported saved 2048 game state version");
+  }
+
+  // Absent on every save written before there was more than one board size, and what
+  // that absence means is not a guess: those games were all played on four.
+  const savedSize = state.size ?? DEFAULT_SIZE;
+  if (!SIZES.includes(savedSize)) {
+    throw new SaveError(`Unsupported saved 2048 board size: ${JSON.stringify(savedSize)}`);
+  }
+  if (savedSize !== size) {
+    throw new SaveError(
+      `Saved 2048 game is ${savedSize}x${savedSize}, read as ${size}x${size}`
+    );
   }
 
   const playSeconds = state.play_seconds;
@@ -531,7 +605,12 @@ export function decodeSavedState(serialized, { best, replayedBest }) {
   const timeline = [];
   for (const entry of savedStates(state)) {
     timeline.push(
-      decodeState(entry, replayedFrom === null ? best : replayedBest, timeline.at(-1) ?? null)
+      decodeState(
+        entry,
+        replayedFrom === null ? best : replayedBest,
+        timeline.at(-1) ?? null,
+        savedSize
+      )
     );
   }
 
@@ -554,6 +633,7 @@ export function decodeSavedState(serialized, { best, replayedBest }) {
 
   const history = decodeHistory(state, timeline);
   return {
+    size: savedSize,
     timeline,
     history,
     cursor,
@@ -608,10 +688,21 @@ function decodeSpawns(state, history, latestMoves) {
  * a record of what was actually dealt. They come off the archived row instead, which is
  * where they were written down when the game ended.
  *
+ * `size` is the board it was played on, which the log itself does not carry: a byte says
+ * which cell a tile landed on and nothing about how wide the board is. It comes off the
+ * archived row instead, beside the undo tallies, for the same reason those do.
+ *
  * Returns a Game seeked to its last state. Throws SaveError on a log the rules reject,
  * which is what a truncated or corrupt one looks like from here.
+ *
+ * The wrong size is caught in one direction and not the other, which is worth being
+ * plain about: a 4x4 log replayed on a mini board deals onto cells 9 and up, and those
+ * are never on the list of empty ones, so it is refused below. A mini log replayed on a
+ * 4x4 board names only cells that exist there, and would rebuild a game that was never
+ * played -- silently, until a direction moved nothing. That is the reason the size is
+ * stored on the archived row rather than inferred from the log: it cannot be inferred.
  */
-export function replaySpawns(spawns) {
+export function replaySpawns(spawns, size = DEFAULT_SIZE) {
   let at = 0;
   // Checked against the cells actually free rather than trusted: the rules hand over the
   // list they would have dealt from, and a log naming a cell that is not on it is
@@ -627,6 +718,7 @@ export function replaySpawns(spawns) {
     return [cell, spawnValue(byte)];
   };
   const game = new Game({
+    size,
     // Bounds nothing: the scores being rebuilt were already bounded by the save this log
     // came out of, and this is not the game the player is playing.
     best: Number.MAX_SAFE_INTEGER,
@@ -669,6 +761,7 @@ export function replaySpawns(spawns) {
  */
 export class Game {
   constructor({
+    size = DEFAULT_SIZE,
     best = 0,
     replayedBest = 0,
     bestTile = 0,
@@ -676,6 +769,12 @@ export class Game {
     random = Math.random,
     spawn = randomSpawn,
   } = {}) {
+    if (!SIZES.includes(size)) {
+      throw new Error(`Unknown 2048 board size: ${size}`);
+    }
+    // Fixed for the life of a game. A board does not change size mid-play: switching
+    // modes puts this game down and takes up the other one, which is a different Game.
+    this.size = size;
     this.random = random;
     this.spawn = spawn;
     this.best = requireNonNegativeInt(best, "best score");
@@ -692,7 +791,7 @@ export class Game {
     // when the oldest states are trimmed and this has to still name the same move --
     // and because naming the move is what it is for.
     this.replayedFrom = null;
-    this.cells = Game.emptyBoard();
+    this.cells = emptyBoard(size);
     this.score = 0;
     this.moves = 0;
     this.gameOver = false;
@@ -804,10 +903,6 @@ export class Game {
     return arrivalCells(previous.cells, state.direction, state.cells);
   }
 
-  static emptyBoard() {
-    return Array.from({ length: SIZE }, () => new Array(SIZE).fill(0));
-  }
-
   /**
    * Place a new tile on an empty cell and return that cell's index.
    *
@@ -824,7 +919,7 @@ export class Game {
       throw new Error("No room for a new 2048 tile");
     }
     const [index, value] = this.spawn(empty, this.random);
-    this.cells[Math.floor(index / SIZE)][index % SIZE] = value;
+    this.cells[Math.floor(index / this.size)][index % this.size] = value;
     if (this.spawns !== null) {
       this.spawns.push(spawnByte(direction, index, value));
     }
@@ -833,7 +928,7 @@ export class Game {
 
   /** Start a new game. Returns the cell indices of the two starting tiles. */
   reset() {
-    this.cells = Game.emptyBoard();
+    this.cells = emptyBoard(this.size);
     this.score = 0;
     this.moves = 0;
     this.gameOver = false;
@@ -977,13 +1072,15 @@ export class Game {
     let gained = 0;
     let changed = false;
 
-    for (const coordinates of lineCoordinates(direction)) {
-      const line = coordinates.map((cell) => before[Math.floor(cell / SIZE)][cell % SIZE]);
+    for (const coordinates of lineCoordinates(direction, this.size)) {
+      const line = coordinates.map(
+        (cell) => before[Math.floor(cell / this.size)][cell % this.size]
+      );
       const { merged, mergePositions, sources, gained: lineGained } =
         compressAndMerge(line);
 
       coordinates.forEach((cell, index) => {
-        this.cells[Math.floor(cell / SIZE)][cell % SIZE] = merged[index];
+        this.cells[Math.floor(cell / this.size)][cell % this.size] = merged[index];
         changed = changed || merged[index] !== line[index];
       });
       for (const index of mergePositions) {
@@ -1030,6 +1127,11 @@ export class Game {
   }
 
   restore(saved) {
+    if (saved.size !== this.size) {
+      throw new SaveError(
+        `Saved 2048 game is ${saved.size}x${saved.size}, restored into ${this.size}x${this.size}`
+      );
+    }
     this.timeline = saved.timeline.map((state) => captureState(state, state.direction));
     this.history = saved.history.map((entry) =>
       historyEntry(entry.moves, entry.score, entry.undos)
@@ -1053,6 +1155,9 @@ export class Game {
   encode(playSeconds) {
     return JSON.stringify({
       version: STATE_VERSION,
+      // What the boards below are, rather than what a reader should assume they are.
+      // Written on every save, including the 4x4 ones a reader would have guessed right.
+      size: this.size,
       timeline: this.timeline.map((state) => ({
         board: state.cells,
         score: state.score,

@@ -1,7 +1,9 @@
 # A 3x3 mini mode for vanilla-2048
 
-Options for putting a second board size in front of the player, and what the
-rules underneath would have to change for it. Nothing here is implemented.
+How a second board size got in front of the player, what the rules underneath
+had to change for it, and what was weighed on the way. This is now built; the
+options not taken are kept because the ones taken only make sense against
+them.
 
 The rules themselves do not change: same spawn odds, same merge, same
 game-over test, same score. The only difference between the two modes is how
@@ -137,14 +139,15 @@ arithmetic ceiling and play lands well below it -- so mini wants its own
 list, `[512, 256, 128, 64, 32]` as a starting guess, checked against actual
 games before it is fixed.
 
-## Where the choice goes: four options
+## Where the choice went: four options, and the measurements
 
-`#actions` currently holds six controls: New Game, Undo, Share, and three
-icon buttons. It is `flex-wrap`, and the panel is already at its width limit
-on a phone -- the note above `#score-line` measures an end-game line at 282px
-of the 330px a 360px phone leaves it. Anything added here can wrap to another
-row, and the board is sized from what the panel leaves over, so a wrapped row
-is paid for in board height.
+`#actions` held six controls: New Game, Undo, Share, and three icon buttons.
+It is `flex-wrap`, and the panel is already at its width limit on a phone --
+the note above `#score-line` measures an end-game line at 282px of the 330px
+a 360px phone leaves it. Anything added here can wrap to another row, and the
+board is sized from what the panel leaves over, so a wrapped row is paid for
+in board height. That is what decided this, and the widths below are measured
+in Chromium against the built page rather than guessed at.
 
 **A. A segmented pair beside New Game: `4x4 | 3x3`.** Follows
 `#archive-tracks` exactly, `aria-pressed` accent and all, so the colour that
@@ -152,12 +155,19 @@ already means "this one is in force" means it here too. The mode is never
 ambiguous, which matters because Best changes meaning with it. One press to
 switch. Costs the most width of any option: two buttons and their gaps.
 
-**B. A single `Mini` toggle, `aria-pressed`.** Half the width of A, and it
-can be an icon beside the other three -- a 3x3 of squares is the same kind of
-glyph they already use. Says less about what the two states are than a
-labelled pair does, but the board underneath is showing three columns or
-four, which is the least ambiguous readout available. **Recommended**, with A
-as the answer if `#actions` measures with room to spare.
+**B. A single `Mini` toggle, `aria-pressed`. Built.** Half the width of A,
+and it is an icon beside the other three -- a 3x3 of squares, the same kind
+of glyph they already use, in the same accent `#archive-tracks` uses for the
+filter in force. It says less about what the two states are than a labelled
+pair does, but the board underneath is showing three columns or four, which
+is the least ambiguous readout available.
+
+What paid for it was the Share button, which became the share sheet's own
+glyph in the same change: the word was 31px that the toggle and the two
+dividers then spent. The toolbar stays on one row from 340px up, and the
+dividers themselves are dropped below 350px, where they are what costs the
+row its second line. Below about 330px it wraps -- a width where the panel is
+already stepping its type down.
 
 **C. Inside the New Game question.** No new chrome at rest: "Discard this
 game?" gains "New 4x4" and "New 3x3" beside Resume. But New Game is the most
@@ -173,20 +183,20 @@ builds the index from directories, so a second entry means a second copy of
 the demo, and a mode reachable only by editing the URL is a mode nobody
 plays. Ship it alongside B as what picks the opening mode.
 
-Whichever lands, the choice persists under its own key, so a reload comes
-back on the board it left.
+The choice persists under `vanilla-2048.boardSize`, so a reload comes back on
+the board it left. D is not built; the key is what the mode opens from.
 
 ## Sizing the board: cap the board, not the cell
 
-`resizeBoard` maxes the *cell* at `MAX_CELL` (92px), so a 3x3 board would
-draw 292px wide where a 4x4 draws 392px -- the play area would visibly shrink
-on switching to mini, for no reason a player would recognise.
+`resizeBoard` maxed the *cell* at `MAX_CELL` (92px), so a 3x3 board would
+have drawn 292px wide where a 4x4 draws 392px -- the play area shrinking by a
+quarter for no reason a player would recognise.
 
-Cap the board extent instead and let the cell follow: mini then draws cells
-about 125px across in the same frame the 4x4 board occupies. Tile type is
-already derived from `cellSize`, so it scales with no other change. It also
-keeps the panel measurement stable across a mode switch, which is the thing
-`resizeBoard`'s own note is careful about.
+`MAX_BOARD` caps the extent instead and lets the cell follow: mini draws
+125px cells in a 391px board against the 4x4 board's 392px, measured. Tile
+type is already derived from `cellSize`, so it scales with no other change.
+It also keeps the panel measurement stable across a switch, which is the
+thing `resizeBoard`'s own note is careful about.
 
 CSS: set `--size` beside `--cell` and `--gap`, and replace the two hardcoded
 4s with it.
@@ -205,15 +215,16 @@ become a loop over both sizes. New cases worth having:
 `test_archive.mjs`: a row with no `n` reads back as 4x4, and the size filter
 splits a mixed list.
 
-## Order of work
+## What is not done
 
-1. `board.js`: size onto the board and the `Game`, save format v4,
-   `replaySpawns` signature. Tests pass before anything is drawn.
-2. `game.js` and the CSS: `--size`, the grid rebuild, board-extent sizing,
-   share image.
-3. The keys: per-size bests, and S2's parked slots.
-4. The archive: `n`, the filter, per-size milestones.
-5. The control, and the `?size=` parameter with it.
-
-Steps 1 and 2 are a mode nothing can reach yet; the control at the end is
-what turns it on.
+- **`?size=`.** Worth having and not built; the mode is remembered rather
+  than linkable.
+- **`MINI_MILESTONE_TILES`.** `[512, 256, 128, 64, 32]` is reasoned from nine
+  cells capping the chain a merge can be built on, not measured against real
+  games. It is the one number here that should be checked by playing.
+- **The imgui demo.** It keeps its own `SIZE = 4` and is untouched.
+- **A mini log replayed at 4x4.** Caught in one direction only: a 4x4 log on
+  a mini board deals onto cells 9 and up and is refused, but a mini log on a
+  4x4 board names cells that all exist there and would rebuild a game nobody
+  played. That is why the size is stored on the archived row -- it cannot be
+  inferred from the log -- and why nothing tries to.

@@ -20,7 +20,9 @@ import {
   decodeArchive,
   encodeArchive,
   gameTrend,
+  MINI_MILESTONE_TILES,
   isClean,
+  isSize,
   milestones,
   summarize,
 } from "../site/vanilla-2048/archive.js";
@@ -306,4 +308,47 @@ test("the trend does not disturb the archive it reads", () => {
   const rows = [game({ id: "a" }), game({ id: "b" })];
   gameTrend(rows);
   assert.deepEqual(rows.map((row) => row.id), ["a", "b"]);
+});
+
+/* Board size ---------------------------------------------------------------- */
+
+test("a row carries the board it was played on", () => {
+  assert.equal(game().n, 4);
+  assert.equal(game({ size: 3 }).n, 3);
+});
+
+test("a row stored before sizes were kept reads back as a 4x4 game", () => {
+  const stored = JSON.parse(encodeArchive([game()]));
+  delete stored.games[0].n;
+  const [row] = decodeArchive(JSON.stringify(stored));
+  assert.equal(row.n, 4);
+});
+
+test("a size that is not a whole number is refused", () => {
+  assert.throws(() => game({ size: -1 }), ArchiveError);
+  assert.throws(() => game({ size: "3" }), ArchiveError);
+});
+
+test("the size filter splits a mixed list", () => {
+  const rows = [
+    game({ id: "a", size: 4 }),
+    game({ id: "b", size: 3 }),
+    game({ id: "c", size: 3 }),
+  ];
+  assert.deepEqual(rows.filter(isSize(3)).map((row) => row.id), ["b", "c"]);
+  assert.deepEqual(rows.filter(isSize(4)).map((row) => row.id), ["a"]);
+});
+
+test("milestones can be asked in mini's own thresholds", () => {
+  const rows = [game({ topTile: 512 }), game({ topTile: 64 }), game({ topTile: 16 })];
+  assert.deepEqual(
+    milestones(rows, MINI_MILESTONE_TILES),
+    [
+      { tile: 512, games: 1 },
+      { tile: 256, games: 1 },
+      { tile: 128, games: 1 },
+      { tile: 64, games: 2 },
+      { tile: 32, games: 2 },
+    ]
+  );
 });

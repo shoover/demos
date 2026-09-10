@@ -20,6 +20,13 @@ export const ARCHIVE_LIMIT = 1000;
 
 export const ARCHIVE_VERSION = 1;
 
+// The board every row written before rows carried a size was played on. Not a default
+// standing in for something unknown: there was one board size then, so a row without one
+// is a 4x4 game and the archive can say so rather than guess. Its own constant here
+// rather than board.js's DEFAULT_SIZE, because this module does not know the rules and
+// does not need to -- what it holds is a number a row was filed under.
+const LEGACY_ROW_SIZE = 4;
+
 /**
  * A rejected archive, as opposed to a bug.
  *
@@ -92,6 +99,7 @@ export function summarize({
   seconds,
   replayedFrom = null,
   recorded = false,
+  size = LEGACY_ROW_SIZE,
 }) {
   if (typeof id !== "string" || id === "") {
     throw new ArchiveError(`Invalid archived 2048 game id: ${JSON.stringify(id)}`);
@@ -122,6 +130,12 @@ export function summarize({
     // not recorded and never can be, so the list says so rather than offering a replay
     // that has nothing behind it.
     rec: recorded === true,
+    // The board it was played on, which is the one field here that decides what the row
+    // may be read *with*: a mini score and a 4x4 score are different achievements, so a
+    // median taken across both describes neither. Validated as a whole number rather
+    // than against a list of sizes, because which sizes the rules offer is board.js's
+    // business and a row is only recording what it was told.
+    n: requireWholeNumber(size, "board size"),
   };
 }
 
@@ -186,6 +200,7 @@ export function decodeArchive(serialized) {
       seconds: row.secs,
       replayedFrom: row.from ?? null,
       recorded: row.rec,
+      size: row.n ?? LEGACY_ROW_SIZE,
     });
   });
 }
@@ -317,10 +332,18 @@ export function gameTrend(rows, limit = TREND_GAMES) {
 }
 
 export const MILESTONE_TILES = [2048, 1024, 512, 256, 128];
+// Mini's own funnel. Nine cells cap the chain a merge can be built on, so a board that
+// reaches 512 has done what a 4x4 board does at 4096, and the classic list read against
+// mini games is a column of zeros with nothing to learn from. These thresholds are a
+// first cut against how the smaller board actually plays, not a derived figure.
+export const MINI_MILESTONE_TILES = [512, 256, 128, 64, 32];
 
-export function milestones(rows) {
-  return MILESTONE_TILES.map((tile) => ({
+export function milestones(rows, tiles = MILESTONE_TILES) {
+  return tiles.map((tile) => ({
     tile,
     games: rows.filter((row) => row.tile >= tile).length,
   }));
 }
+
+/** Whether a row is a game played on a board `size` a side. */
+export const isSize = (size) => (row) => row.n === size;

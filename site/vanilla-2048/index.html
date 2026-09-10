@@ -36,6 +36,9 @@
       /* Painted by the script on every resize; every board dimension derives from them. */
       --cell: 92px;
       --gap: 8px;
+      /* Cells a side. The board, the grid and the script's own arithmetic all read this
+         one figure, so switching modes moves the whole board at once. */
+      --size: 4;
 
       /* The graph's two series, and nothing else in the page is coloured with them: its
          axes and labels are the panel's own greys, so the only thing colour means there
@@ -206,6 +209,30 @@
       align-items: center;
     }
 
+    /* The row reads as three runs rather than eight controls: what the game is (start it,
+       size it, share it), what to do with the game in hand (take a move back, walk it,
+       read it), and the games that are over. The grouping is the whole reason the
+       dividers are here -- a rule between every pair would be decoration.
+
+       A group wraps inside itself as well as the row wrapping between groups, so a phone
+       narrow enough to break a run breaks it rather than pushing the panel wide. */
+    .action-group {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+    }
+
+    /* As tall as the buttons it stands between rather than a fixed height, so it keeps
+       reading as a divider at whatever size the panel's type is being drawn at. The
+       weight is the button border's, which is the quietest line already on the row. */
+    .action-rule {
+      width: 1px;
+      align-self: stretch;
+      min-height: 16px;
+      background: rgba(255, 255, 255, 0.18);
+    }
+
     /* Board ---------------------------------------------------------------- */
 
     #board-wrap {
@@ -219,13 +246,13 @@
 
     #board {
       position: relative;
-      width: calc(var(--cell) * 4 + var(--gap) * 3);
-      height: calc(var(--cell) * 4 + var(--gap) * 3);
+      width: calc(var(--cell) * var(--size) + var(--gap) * (var(--size) - 1));
+      height: calc(var(--cell) * var(--size) + var(--gap) * (var(--size) - 1));
     }
 
     #grid {
       display: grid;
-      grid-template-columns: repeat(4, var(--cell));
+      grid-template-columns: repeat(var(--size), var(--cell));
       gap: var(--gap);
     }
 
@@ -294,9 +321,18 @@
        how it got there. Both are icons in a row of words, so both are centred in a frame
        sized like the buttons beside them. */
     #time-travel,
-    #graph {
+    #graph,
+    #mini,
+    #share {
       display: grid;
       place-items: center;
+    }
+
+    /* The mode in force, in the accent a pressed button takes -- the same colour, and
+       for the same reason, as the track in force in the past-games list. */
+    #mini[aria-pressed="true"] {
+      border-color: #6f8fd0;
+      background: #4b6eaf;
     }
 
     /* Drawn rather than set: the panel's font is a Latin subset with no clock in it,
@@ -304,7 +340,9 @@
        none of. */
     #time-travel svg,
     #past-games svg,
-    #graph svg {
+    #graph svg,
+    #mini svg,
+    #share svg {
       width: 15px;
       height: 15px;
       fill: none;
@@ -654,6 +692,7 @@
       display: flex;
       flex-wrap: wrap;
       gap: 6px;
+      align-items: center;
     }
 
     /* The track in force is filled with the accent a held button takes, so which one is
@@ -822,6 +861,16 @@
     main { padding: 6px; }
     #panel { font-size: 13px; }
     #board-wrap { margin: 2px 0; }
+    /* The same tightening the board takes on a phone, for the same reason: the toolbar is
+       the widest run of controls in the panel, and eight gaps at the desktop figure are
+       what push it onto a second row on a 360px screen -- which the board then pays for
+       in height, since it is sized from what the panel leaves over. */
+    #actions, .action-group { gap: 6px; }
+    /* Below 350px even that is not enough, and the dividers go before the row does. They
+       say how the controls group, which is worth their width right up until it is what
+       costs the toolbar a second line -- and that line comes out of the board, which is
+       the thing all this is being divided up for. The order still groups them. */
+    @media (max-width: 349px) { .action-rule { display: none; } }
     #chart { height: 148px; }
     #chart-legend, #chart-readout { font-size: 11px; }
     #archive-chart { height: 124px; }
@@ -885,7 +934,105 @@
       <!-- The game's own controls, and after them the clock that opens the ones for
            going back through it. -->
       <div id="actions">
-        <button id="new-game" type="button">New Game</button>
+        <!-- Three runs, divided by a rule each: the game, the game in hand, and the games
+             that are over. Every popup below hangs off this element rather than off the
+             group its button sits in -- they share one anchor and one width, and a group
+             is a layout run rather than a thing to be positioned against. -->
+        <div class="action-group">
+          <button id="new-game" type="button">New Game</button>
+          <!-- The board, three cells a side instead of four. A toggle rather than a pair
+               of sizes to choose between: there are two, the board underneath is already
+               showing which one is on, and the row has no width to spare for saying it
+               twice.
+
+               Pressing it does not cost the game in hand. Each size keeps its own save,
+               so this puts one game down and takes the other up, and pressing back
+               returns to the board exactly as it was left. -->
+          <button
+            id="mini"
+            type="button"
+            aria-pressed="false"
+            aria-label="Mini board"
+            title="Mini board: 3x3"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <rect x="3.5" y="3.5" width="17" height="17" rx="2.5" />
+              <path d="M9.2 3.5 V20.5 M14.8 3.5 V20.5 M3.5 9.2 H20.5 M3.5 14.8 H20.5" />
+            </svg>
+          </button>
+          <!-- The share sheet's own glyph: a page with an arrow leaving it. The word was
+               the widest thing in the row that was not the game's own name, and this is
+               the one action here that already has a picture everyone knows. -->
+          <button id="share" type="button" aria-label="Share" title="Share">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M12 3.6 V14.4" />
+              <path d="M8.3 7.3 L12 3.5 L15.7 7.3" />
+              <path d="M8 10.5 H6 A2 2 0 0 0 4 12.5 V18.5 A2 2 0 0 0 6 20.5 H18 A2 2 0 0 0 20 18.5 V12.5 A2 2 0 0 0 18 10.5 H16" />
+            </svg>
+          </button>
+        </div>
+
+        <span class="action-rule" aria-hidden="true"></span>
+
+        <div class="action-group">
+          <!-- The last move, taken back. Up here rather than in the popup because taking
+               one move back is part of playing, while walking the history is not; what it
+               does under the covers is the popup's own truncation, one state along.
+
+               Disabled while an earlier state is on screen, so it always means the same
+               thing and always costs the same: one move, the newest one. Reaching back
+               further is what the popup is for, and the popup says what that costs. -->
+          <button id="undo" type="button" title="Take back the last move" disabled>Undo</button>
+          <button
+            id="time-travel"
+            type="button"
+            aria-label="Move history"
+            aria-expanded="false"
+            aria-controls="timeline"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <circle cx="12" cy="12" r="9" />
+              <path d="M12 6.6 V12.4 L16.2 14.8" />
+            </svg>
+          </button>
+          <!-- One spark line, and nothing under it. At 15px the axis was a second stroke
+               carrying no information the line does not, and dropping it lets the line
+               have the whole frame -- which is what makes it read as a graph beside the
+               clock rather than as a scribble in the corner of one. Drawn rather than set,
+               for the reason the clock is. -->
+          <button
+            id="graph"
+            type="button"
+            aria-label="Game stats"
+            aria-expanded="false"
+            aria-controls="stats-panel"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M3.5 17.5 L9.5 9.5 L14 13.5 L20.5 6.5" />
+            </svg>
+          </button>
+        </div>
+
+        <span class="action-rule" aria-hidden="true"></span>
+
+        <div class="action-group">
+          <!-- The games that are over. A stack of rules rather than a clock or a spark
+               line: what this opens is a list, and the two icons beside it are already
+               using the shapes that mean "this game". The last rule is short, which is
+               what keeps three equal lines from reading as a hamburger menu. -->
+          <button
+            id="past-games"
+            type="button"
+            aria-label="Past games"
+            aria-expanded="false"
+            aria-controls="archive-panel"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M4 7.5 H20 M4 12 H20 M4 16.5 H13" />
+            </svg>
+          </button>
+        </div>
+
         <!-- What New Game costs, asked before it is paid. Only a game with moves on it
              is worth asking about, so this is the same button either way: see
              requestNewGame for which press opens the question and which just answers it.
@@ -903,59 +1050,6 @@
           <button id="confirm-new-game" type="button">Discard</button>
           <button id="resume-game" type="button">Resume</button>
         </div>
-        <!-- The last move, taken back. Up here rather than in the popup because taking
-             one move back is part of playing, while walking the history is not; what it
-             does under the covers is the popup's own truncation, one state along.
-
-             Disabled while an earlier state is on screen, so it always means the same
-             thing and always costs the same: one move, the newest one. Reaching back
-             further is what the popup is for, and the popup says what that costs. -->
-        <button id="undo" type="button" title="Take back the last move" disabled>Undo</button>
-        <button id="share" type="button">Share</button>
-        <button
-          id="time-travel"
-          type="button"
-          aria-label="Move history"
-          aria-expanded="false"
-          aria-controls="timeline"
-        >
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <circle cx="12" cy="12" r="9" />
-            <path d="M12 6.6 V12.4 L16.2 14.8" />
-          </svg>
-        </button>
-        <!-- One spark line, and nothing under it. At 15px the axis was a second stroke
-             carrying no information the line does not, and dropping it lets the line
-             have the whole frame -- which is what makes it read as a graph beside the
-             clock rather than as a scribble in the corner of one. Drawn rather than set,
-             for the reason the clock is. -->
-        <button
-          id="graph"
-          type="button"
-          aria-label="Game stats"
-          aria-expanded="false"
-          aria-controls="stats-panel"
-        >
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <path d="M3.5 17.5 L9.5 9.5 L14 13.5 L20.5 6.5" />
-          </svg>
-        </button>
-        <!-- The games that are over. A stack of rules rather than a clock or a spark
-             line: what this opens is a list, and the two icons beside it are already
-             using the shapes that mean "this game". The last rule is short, which is
-             what keeps three equal lines from reading as a hamburger menu. -->
-        <button
-          id="past-games"
-          type="button"
-          aria-label="Past games"
-          aria-expanded="false"
-          aria-controls="archive-panel"
-        >
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <path d="M4 7.5 H20 M4 12 H20 M4 16.5 H13" />
-          </svg>
-        </button>
-
         <!-- The slider is the whole game so far, one stop per move; the buttons beside
              it step a single move, for touch and for precision.
 
@@ -1025,10 +1119,21 @@
           <!-- The same split the score line draws with its asterisk: a game played on
                from an earlier state is not the achievement a straight one is, so the
                figures can be asked of either track or of everything. -->
+          <!-- Two filters on one row and one rule between them, the same grouping the
+               toolbar above uses. The track is how a game was played; the board is which
+               game it was. They are independent, and the list is what satisfies both.
+
+               The board is a filter rather than a column because the figures below are
+               read across whatever is in the list: a median over both sizes at once
+               would describe neither, and the trend graph would draw every mini game as
+               a collapse next to a 4x4 one. -->
           <p id="archive-tracks">
             <button type="button" data-track="all" aria-pressed="true">All</button>
             <button type="button" data-track="clean" aria-pressed="false">Clean</button>
             <button type="button" data-track="replayed" aria-pressed="false">Replayed</button>
+            <span class="action-rule" aria-hidden="true"></span>
+            <button type="button" data-size="4" aria-pressed="true">4x4</button>
+            <button type="button" data-size="3" aria-pressed="false">3x3</button>
           </p>
           <!-- How much has been played, how well, and how far: three questions, three
                lines, painted by the script. -->
