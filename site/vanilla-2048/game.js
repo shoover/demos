@@ -2301,14 +2301,14 @@ function commitChange(bestChanged = false) {
 }
 
 /**
- * Say which board is in force: the figure on the picker, and the tick in its list.
+ * Say which board is in force: the size on the picker, and the tick in its list.
  *
  * Both from the game rather than from whatever was last pressed, so the picker cannot
  * disagree with the board -- a restore, a switch and a corrupt save that sent startup
  * back to the other size all come through here.
  */
 function paintBoardSize() {
-  elements.boardSizeValue.textContent = String(game.size);
+  elements.boardSizeValue.textContent = `${game.size}x${game.size}`;
   for (const option of elements.boardSizeMenu.querySelectorAll("button")) {
     option.setAttribute("aria-checked", String(Number(option.dataset.size) === game.size));
   }

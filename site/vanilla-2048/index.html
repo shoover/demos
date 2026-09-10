@@ -340,10 +340,9 @@
       gap: 5px;
     }
 
-    /* The label recedes and the value does not: what is being read off this row at a
-       glance is which board is in force, and the word is only there to say what the
-       figure counts. Both in the panel's own muted grey and its own tabular figures. */
-    .picker-label { color: #9fb3c8; }
+    /* What is being read off this row at a glance is which board is in force, and 3x3
+       says that without a word in front of it. The panel's own tabular figures, so the
+       two sizes are the same width and the chevron does not move when one is picked. */
     .picker-value { font-variant-numeric: tabular-nums; }
 
     .picker-chevron {
@@ -1023,13 +1022,14 @@
         <div class="action-group">
           <button id="new-game" type="button">New Game</button>
           <!-- The board a game is played on, named and picked rather than toggled. A
-               settings row's shape, at the width a toolbar can afford: the label, the
-               size in force, and a chevron saying there is more behind it. Pressed, it
-               lists what there is -- which is the part a toggle cannot do, since a toggle
-               only ever says what it is not currently.
+               settings row's shape, at the width a toolbar can afford: the size in force
+               and a chevron saying there is more behind it. Pressed, it lists what there
+               is -- which is the part a toggle cannot do, since a toggle only ever says
+               what it is not currently.
 
-               The value is the figure alone because the board is square and the row is
-               narrow; the options spell it out, where there is room to.
+               The value is written the way the options are, 3x3 rather than 3, which is
+               what lets the word Size come off the row: a board spelled out in both
+               dimensions says what it is counting without being told.
 
                Picking does not cost the game in hand. Each size keeps its own save, so
                this puts one game down and takes the other up, and picking back returns
@@ -1043,8 +1043,7 @@
               aria-controls="board-size-menu"
               title="Board size"
             >
-              <span class="picker-label">Size</span>
-              <span class="picker-value" id="board-size-value">4</span>
+              <span class="picker-value" id="board-size-value">4x4</span>
               <svg class="picker-chevron" viewBox="0 0 24 24" aria-hidden="true">
                 <path d="M9.5 4.5 L17 12 L9.5 19.5" />
               </svg>
