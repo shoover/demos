@@ -1,0 +1,60 @@
+/* Paintbox in a browser: one classic program window on a desktop, with its own title bar and menu bar. */
+/* Pixelify Sans (SIL Open Font License, beside this file), Latin subset; one variable file has every weight. */
+@font-face{
+  font-family:"Pixelify Sans";font-style:normal;font-weight:400 700;font-display:swap;
+  src:url("pixelify-sans-latin.woff2") format("woff2");
+}
+:root{
+  --desk:#2c5e66;
+  --ui: Tahoma, Verdana, "Segoe UI", Geneva, "DejaVu Sans", sans-serif;
+  --mark: "Pixelify Sans", Tahoma, Verdana, sans-serif;
+}
+body{
+  background:var(--desk);padding-block:12px;
+  padding-left:max(16px, env(safe-area-inset-left, 0px));
+  padding-right:max(16px, env(safe-area-inset-right, 0px));
+}
+@media (pointer:coarse){ body{font-size:13px} }
+.win{max-width:100%;box-shadow:var(--raised);padding:3px}
+
+.titlebar{
+  display:flex;align-items:center;gap:5px;flex:none;height:22px;padding:0 2px 0 3px;
+  background:linear-gradient(90deg,var(--title-a),var(--title-b));color:var(--title-ink);
+}
+.titlebar canvas{width:16px;height:16px;image-rendering:pixelated;flex:none}
+.titlebar .name{flex:1;min-width:0;font:700 13px/1 var(--mark);letter-spacing:.02em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tbtn svg{display:block}
+
+.menubar{display:flex;flex-wrap:wrap;flex:none;padding:1px 0 2px;position:relative;z-index:40}
+.mwrap{position:relative}
+.mtop{border:0;background:none;padding:3px 7px;line-height:1.2}
+.mtop:hover,.mtop[aria-expanded="true"]{background:var(--pick);color:var(--pick-ink)}
+.mtop:focus-visible{outline:1px dotted var(--ink);outline-offset:-3px}
+.menu{
+  position:absolute;top:100%;left:0;min-width:212px;max-width:calc(100vw - 32px);
+  background:var(--face);box-shadow:var(--raised);padding:3px;z-index:60;
+}
+.mi{
+  display:grid;grid-template-columns:16px 1fr auto;gap:4px;align-items:center;width:100%;
+  border:0;background:none;padding:3px 10px 3px 4px;text-align:left;white-space:nowrap;
+}
+.mi .key{color:var(--muted);padding-left:18px}
+.mi:hover,.mi:focus-visible{background:var(--pick);color:var(--pick-ink);outline:none}
+.mi:hover .key,.mi:focus-visible .key{color:var(--pick-ink)}
+.mi[disabled]{color:var(--lo);text-shadow:1px 1px 0 var(--hi)}
+.mi[disabled]:hover{background:none;color:var(--lo)}
+.mi[disabled] .key{color:inherit}
+.msep{height:0;margin:3px 2px;border-top:1px solid var(--lo);border-bottom:1px solid var(--hi)}
+
+@media (max-width:520px){ .status .xy,.status .wh{width:76px;padding:3px 4px} }
+
+.dlg-back{padding-left:max(16px, env(safe-area-inset-left, 0px));padding-right:max(16px, env(safe-area-inset-right, 0px))}
+.dlg header{font:700 13px/1 var(--mark)}
+.saveas{display:grid;grid-template-columns:auto minmax(0,220px);gap:6px 8px;align-items:center}
+.saveas input,.saveas select{height:22px;border:0;background:var(--paper);box-shadow:var(--sunken);padding:0 5px;min-width:0}
+.saveas input{user-select:text;-webkit-user-select:text}
+.saveas input:focus,.saveas select:focus{outline:1px dotted var(--ink);outline-offset:1px}
+.about-mark{font:700 26px/1 var(--mark);letter-spacing:.02em;margin:2px 0 8px}
+
+/* The color picker opens from this input; it has to be rendered for showPicker() to anchor it. */
+.offscreen{position:fixed;left:16px;bottom:16px;width:1px;height:1px;opacity:0;pointer-events:none;border:0;padding:0}

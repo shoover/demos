@@ -1,0 +1,136 @@
+/* Layout: the inside of a classic paint program window: toolbox | scrolling workspace, color box and status bar.
+   The host's host.css frames it (the Mac app's window, or a painted window on a desktop in the browser).
+   A deliberate single late-90s look. */
+:root{
+  --face:#c4c3be;
+  --face-hi:#e2e1dc;
+  --hi:#ffffff;
+  --lo:#82817b;
+  --dark:#0c0c0b;
+  --ink:#0c0c0b;
+  --muted:#6a6963;
+  --title-a:#13306c;
+  --title-b:#4b80b9;
+  --title-ink:#ffffff;
+  --pick:#13306c;
+  --pick-ink:#ffffff;
+  --work:#7f8085;
+  --paper:#ffffff;
+  --scrim:rgba(12,24,28,.45);
+  --grid:rgba(60,60,60,.35);
+  --ui: Tahoma, Verdana, Geneva, sans-serif;
+  --raised: inset 1px 1px var(--hi), inset -1px -1px var(--dark), inset 2px 2px var(--face-hi), inset -2px -2px var(--lo);
+  --pressed: inset 1px 1px var(--dark), inset -1px -1px var(--hi), inset 2px 2px var(--lo), inset -2px -2px var(--face-hi);
+  --sunken: inset 1px 1px var(--lo), inset -1px -1px var(--hi), inset 2px 2px var(--dark), inset -2px -2px var(--face-hi);
+  --thin: inset 1px 1px var(--lo), inset -1px -1px var(--hi);
+  color-scheme: light;
+}
+html{height:100%;box-sizing:border-box}
+[hidden]{display:none!important}
+*,*::before,*::after{box-sizing:inherit}
+body{height:100%;margin:0;overflow:hidden;background:var(--face);color:var(--ink);font:12px/1.3 var(--ui)}
+button,input,select,textarea{font:inherit;color:inherit}
+button{cursor:default}
+
+.win{
+  height:100%;display:flex;flex-direction:column;
+  background:var(--face);user-select:none;-webkit-user-select:none;
+}
+.tbtn{
+  width:18px;height:16px;padding:0;border:0;background:var(--face);color:var(--ink);box-shadow:var(--raised);
+  display:grid;place-items:center;font:700 11px/1 var(--ui);flex:none;
+}
+.tbtn:active{box-shadow:var(--pressed)}
+
+.main{flex:1;min-height:0;display:flex;gap:3px;position:relative}
+.toolbox{flex:none;width:56px;display:flex;flex-direction:column;align-items:center;gap:6px;padding:2px 2px 0}
+.tools{display:grid;grid-template-columns:repeat(2,25px)}
+.tool{width:25px;height:25px;padding:0;border:0;background:var(--face);box-shadow:var(--raised);display:grid;place-items:center}
+.tool canvas{width:16px;height:16px;image-rendering:pixelated;pointer-events:none}
+.tool[aria-pressed="true"]{
+  box-shadow:var(--pressed);
+  background:repeating-conic-gradient(var(--hi) 0 25%, var(--face) 0 50%) 0 0/2px 2px;
+}
+.tool[aria-pressed="true"] canvas{transform:translate(1px,1px)}
+.tool:focus-visible{outline:1px dotted var(--ink);outline-offset:-5px}
+.opts{
+  width:44px;min-height:70px;box-shadow:var(--thin);padding:4px 3px;
+  display:flex;flex-direction:column;align-items:stretch;gap:2px;
+}
+.opts.grid3{display:grid;grid-template-columns:repeat(3,1fr);align-content:start;gap:1px}
+.opt{border:0;background:none;padding:1px;display:grid;place-items:center;font-size:11px;line-height:1}
+.opt canvas{image-rendering:pixelated;display:block}
+.opt[aria-pressed="true"]{background:var(--pick);color:var(--pick-ink)}
+.opt:focus-visible{outline:1px dotted var(--ink)}
+
+.ws{
+  flex:1;min-width:0;overflow:auto;background:var(--work);box-shadow:var(--sunken);padding:5px;
+  overscroll-behavior:contain;
+}
+.stage{position:relative;display:inline-block;vertical-align:top;margin:0 14px 14px 0;touch-action:none}
+#cv{display:block;background:var(--paper);image-rendering:pixelated}
+#ov{position:absolute;left:0;top:0;pointer-events:none;image-rendering:pixelated}
+.gridlay{position:absolute;left:0;top:0;pointer-events:none;
+  background-image:linear-gradient(to right,var(--grid) 1px,transparent 1px),linear-gradient(to bottom,var(--grid) 1px,transparent 1px)}
+#sel{position:absolute;outline:1px dashed var(--pick);outline-offset:0;cursor:move;touch-action:none}
+#sel canvas{display:block;width:100%;height:100%;image-rendering:pixelated;pointer-events:none}
+#marq{position:absolute;border:1px dashed var(--pick);pointer-events:none}
+#tbox{position:absolute;outline:1px dashed var(--pick)}
+#ta{
+  display:block;width:100%;height:100%;margin:0;padding:0;border:0;outline:0;resize:none;overflow:hidden;
+  background:transparent;white-space:pre-wrap;word-wrap:break-word;user-select:text;-webkit-user-select:text;
+}
+.handle{position:absolute;width:5px;height:5px;background:var(--pick)}
+.handle::before{content:"";position:absolute;inset:-7px}
+.handle[data-k="r"]{left:100%;top:50%;margin:-2px 0 0 1px;cursor:ew-resize}
+.handle[data-k="b"]{top:100%;left:50%;margin:1px 0 0 -2px;cursor:ns-resize}
+.handle[data-k="rb"]{left:100%;top:100%;margin:1px 0 0 1px;cursor:nwse-resize}
+
+.fontbar{
+  position:absolute;left:62px;top:4px;z-index:30;background:var(--face);box-shadow:var(--raised);padding:3px 4px 4px;
+  display:flex;flex-direction:column;gap:3px;max-width:calc(100% - 70px);
+}
+.fontbar .cap{font:700 11px/1 var(--ui);padding:2px 2px 0}
+.fontbar .row{display:flex;flex-wrap:wrap;gap:3px;align-items:center}
+.fontbar select{height:21px;border:0;background:var(--paper);box-shadow:var(--sunken);padding:0 2px}
+.fbtn{width:23px;height:21px;border:0;background:var(--face);box-shadow:var(--raised);padding:0}
+.fbtn[aria-pressed="true"]{box-shadow:var(--pressed);background:repeating-conic-gradient(var(--hi) 0 25%, var(--face) 0 50%) 0 0/2px 2px}
+
+.colorbar{display:flex;align-items:center;gap:5px;padding:5px 2px 3px;flex:none;flex-wrap:wrap}
+.current{position:relative;width:32px;height:32px;flex:none;border:0;padding:0;background:var(--face);
+  box-shadow:var(--sunken);background-image:repeating-conic-gradient(var(--hi) 0 25%, var(--face) 0 50%);background-size:2px 2px}
+.current span{position:absolute;width:14px;height:14px;box-shadow:inset 1px 1px var(--hi),inset -1px -1px var(--lo),0 0 0 1px var(--face)}
+.current .bgc{right:5px;bottom:5px}
+.current .fgc{left:5px;top:5px;z-index:1}
+.current:focus-visible{outline:1px dotted var(--ink);outline-offset:-4px}
+.palette{display:grid;grid-template-columns:repeat(14,16px);grid-auto-rows:16px;gap:0;min-width:0}
+.sw{border:0;padding:0;width:16px;height:16px;box-shadow:var(--sunken)}
+.sw:focus-visible{outline:1px dotted var(--ink);outline-offset:-1px}
+
+.status{display:flex;gap:2px;flex:none;padding-top:2px}
+.status > div{box-shadow:var(--thin);padding:3px 6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-variant-numeric:tabular-nums}
+.status .hint{flex:1;min-width:0}
+.status .xy,.status .wh{flex:none;width:96px}
+
+.dlg-back{position:fixed;inset:0;background:var(--scrim);display:grid;place-items:center;z-index:100;padding:0 16px}
+.dlg{background:var(--face);box-shadow:var(--raised);padding:3px;min-width:min(280px,100%);max-width:min(520px,100%);
+  max-height:calc(100% - 32px);display:flex;flex-direction:column;user-select:none;-webkit-user-select:none}
+.dlg header{display:flex;align-items:center;gap:6px;height:22px;padding:0 2px 0 6px;flex:none;
+  background:linear-gradient(90deg,var(--title-a),var(--title-b));color:var(--title-ink);font:700 12px/1 var(--ui)}
+.dlg header span{flex:1}
+.dlg .body{padding:12px 12px 6px;overflow:auto;line-height:1.45}
+.dlg .body p{margin:0 0 8px;max-width:60ch}
+.dlg footer{display:flex;justify-content:flex-end;gap:6px;padding:8px 10px 8px;flex-wrap:wrap}
+.btn{min-width:76px;height:24px;border:0;background:var(--face);box-shadow:var(--raised);padding:0 10px}
+.btn:active{box-shadow:var(--pressed)}
+.btn:focus-visible{outline:1px dotted var(--ink);outline-offset:-5px}
+.btn.primary{box-shadow:0 0 0 1px var(--dark),var(--raised)}
+.field{display:grid;grid-template-columns:auto 90px auto;gap:6px 8px;align-items:center}
+.field input{height:22px;border:0;background:var(--paper);box-shadow:var(--sunken);padding:0 5px;user-select:text;-webkit-user-select:text;font-variant-numeric:tabular-nums}
+.field input:focus{outline:1px dotted var(--ink);outline-offset:1px}
+.keys{border-collapse:collapse;font-variant-numeric:tabular-nums}
+.keys td{padding:2px 14px 2px 0;vertical-align:top}
+.keys td:first-child{white-space:nowrap;font-weight:700}
+
+.viewer{position:fixed;inset:0;z-index:120;background:var(--dark);display:grid;place-items:center;cursor:pointer}
+.viewer canvas{max-width:100%;max-height:100%;image-rendering:pixelated}

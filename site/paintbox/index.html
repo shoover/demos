@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Paintbox</title>
+<meta name="description" content="A paint program in the spirit of classic MS Paint, sharing its core with a native Mac app: sixteen tools, a 28-color palette, and hard-edged pixels with no anti-aliasing.">
+<link rel="stylesheet" href="paintbox.css">
+<link rel="stylesheet" href="host.css">
+</head>
+<body>
+<div class="win" id="win">
+  <div class="main">
+    <div class="toolbox" id="toolbox">
+      <div class="tools" id="tools" role="toolbar" aria-label="Tools"></div>
+      <div class="opts" id="opts" aria-label="Tool options"></div>
+    </div>
+    <div class="ws" id="ws">
+      <div class="stage" id="stage">
+        <canvas id="cv" width="10" height="10"></canvas>
+        <canvas id="ov" width="10" height="10"></canvas>
+        <div class="gridlay" id="gridlay" hidden></div>
+        <div id="sel" hidden><canvas></canvas></div>
+        <div id="tbox" hidden><textarea id="ta" spellcheck="false" aria-label="Text"></textarea></div>
+        <div id="marq" hidden></div>
+        <div class="handle" data-k="r" title="Drag to resize the picture"></div>
+        <div class="handle" data-k="b" title="Drag to resize the picture"></div>
+        <div class="handle" data-k="rb" title="Drag to resize the picture"></div>
+      </div>
+    </div>
+    <div class="fontbar" id="fontbar" hidden>
+      <div class="cap">Fonts</div>
+      <div class="row">
+        <select id="fFamily" aria-label="Font">
+          <option value="Arial, Helvetica, sans-serif">Arial</option>
+          <option value="'Times New Roman', Times, serif">Times New Roman</option>
+          <option value="'Courier New', Courier, monospace">Courier New</option>
+          <option value="Georgia, serif">Georgia</option>
+          <option value="Verdana, Geneva, sans-serif">Verdana</option>
+          <option value="Tahoma, Verdana, sans-serif">Tahoma</option>
+          <option value="'Trebuchet MS', sans-serif">Trebuchet MS</option>
+          <option value="Impact, 'Arial Black', sans-serif">Impact</option>
+          <option value="'Comic Sans MS', cursive">Comic Sans MS</option>
+        </select>
+        <select id="fSize" aria-label="Font size"></select>
+      </div>
+      <div class="row">
+        <button class="fbtn" id="fB" type="button" aria-pressed="false" aria-label="Bold"><b>B</b></button>
+        <button class="fbtn" id="fI" type="button" aria-pressed="false" aria-label="Italic"><i style="font-family:Georgia,serif">I</i></button>
+        <button class="fbtn" id="fU" type="button" aria-pressed="false" aria-label="Underline"><u>U</u></button>
+      </div>
+    </div>
+  </div>
+  <div class="colorbar" id="colorbar">
+    <button class="current" id="current" type="button" aria-label="Swap foreground and background colors" title="Click to swap colors (X)">
+      <span class="fgc" id="fgc"></span><span class="bgc" id="bgc"></span>
+    </button>
+    <div class="palette" id="palette" aria-label="Colors"></div>
+  </div>
+  <div class="status" id="status">
+    <div class="hint" id="hint"></div>
+    <div class="xy" id="xy"></div>
+    <div class="wh" id="wh"></div>
+  </div>
+</div>
+<script src="raster.js"></script>
+<script src="menus.js"></script>
+<script src="host.js"></script>
+<script src="paintbox.js"></script>
+</body>
+</html>
