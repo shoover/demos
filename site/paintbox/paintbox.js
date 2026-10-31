@@ -721,10 +721,10 @@ ws.addEventListener('pointerdown', e => {
 /* ---------- document ---------- */
 const loadURL = url => new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = url; });
 // Opening or starting a picture replaces the document, so its undo history goes too.
-function openImage(img) {
+function openImage(src, w, h) {
   commitAll(); clearUndo();
-  setSize(img.naturalWidth, img.naturalHeight);
-  ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, W, H); ctx.drawImage(img, 0, 0);
+  setSize(w, h);
+  ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, W, H); ctx.drawImage(src, 0, 0);
   S.dirty = false; setZoom(1, [0, 0]); hint();
 }
 function newImage() {
@@ -898,7 +898,8 @@ function syncState() {
 }
 for (const type of ['pointerdown', 'pointerup', 'keydown', 'keyup', 'focusin', 'focusout']) document.addEventListener(type, syncState, true);
 
-// Pictures come in as URLs (data: from the Mac app, blob: from the browser). Both resolve to whether it worked.
+// Pictures come in as URLs (data: from the Mac app, blob: from the browser), which resolve to whether it worked, or
+// as ImageData. picture() hands out ImageData too.
 const app = window.paintbox = {
   cmd,
   state: pageState,
@@ -908,7 +909,9 @@ const app = window.paintbox = {
   exportImage(type) { commitAll(); syncState(); return cv.toDataURL(type, 0.92); },
   copySelection(cut) { const c = copySel(cut); syncState(); return c && c.toDataURL('image/png'); },
   pasteURL(url) { return loadURL(url).then(img => { pasteCanvas(img); return true; }, () => { hint('Could not read the pasted picture.'); return false; }); },
-  openURL(url) { return loadURL(url).then(img => { openImage(img); syncState(); return true; }, () => { hint('Could not open that picture.'); return false; }); },
+  openURL(url) { return loadURL(url).then(img => { openImage(img, img.naturalWidth, img.naturalHeight); syncState(); return true; }, () => { hint('Could not open that picture.'); return false; }); },
+  picture() { commitAll(); syncState(); return ctx.getImageData(0, 0, W, H); },
+  openPicture(img) { const c = mk(img.width, img.height); g2(c).putImageData(img, 0, 0); openImage(c, c.width, c.height); syncState(); },
   newImage() { newImage(); syncState(); },
   markSaved() { S.dirty = false; syncState(); },
   setEditedColor

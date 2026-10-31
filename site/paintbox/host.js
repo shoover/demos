@@ -1,6 +1,6 @@
 /* Paintbox in a web browser: draws the window's title bar and menu bar from the shared menus, opens pictures
-   that are chosen or dropped, saves by downloading PNG or JPEG files, and uses the browser's clipboard and
-   color picker. */
+   that are chosen or dropped, saves by downloading PNG or JPEG files, shares pictures as links,
+   and uses the browser's clipboard and color picker. */
 window.paintboxHost = (() => {
 'use strict';
 const $ = s => document.querySelector(s);
@@ -102,6 +102,7 @@ const OWN = {
   open() { confirmDiscard().then(ok => { if (ok) fileIn.click(); }); },
   save() { save(false); },
   saveAs() { save(true); },
+  copyLink,
   cut() { copy(true); },
   copy() { copy(false); },
   paste,
@@ -186,6 +187,94 @@ function saveAsDialog() {
   });
 }
 
+/* ---------- links ---------- */
+// File ▸ Copy Link copies the page's address with the picture in its fragment, which browsers don't send to the
+// server. The fragment is #v1. and then base64url of these bytes, raw-deflated: the width and height (16 bits
+// each), the number of colors less one (8 bits), each color's red, green and blue, then the rows of pixels. A row
+// packs each pixel's color number into as few bits as the colors need (1, 2, 4 or 8), starting at the high bits
+// of each byte, and is stored as its difference (XOR) from the row above, as in PNG.
+const LINK = '#v1.';
+// Firefox's longest address; Chrome takes twice that.
+const MAX_ADDRESS = 2 ** 20;
+const addressBase = () => location.href.replace(/#.*$/, '');
+const bitsFor = colors => colors <= 2 ? 1 : colors <= 4 ? 2 : colors <= 16 ? 4 : 8;
+
+const pipe = (bytes, stream) => new Response(new Blob([bytes]).stream().pipeThrough(stream)).arrayBuffer().then(b => new Uint8Array(b));
+function toBase64url(bytes) {
+  let s = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+const fromBase64url = t => Uint8Array.from(atob(t.replace(/-/g, '+').replace(/_/g, '/')), ch => ch.charCodeAt(0));
+// Resolves to the fragment, or null when the picture has more than 256 colors.
+function encodePicture({ width, height, data }) {
+  const colors = new Map(), rgb = [], idx = new Uint8Array(width * height);
+  for (let p = 0, i = 0; p < idx.length; p++, i += 4) {
+    if (data[i + 3] !== 255) throw new Error('The picture has a see-through pixel at ' + p % width + ',' + Math.floor(p / width));
+    const c = data[i] << 16 | data[i + 1] << 8 | data[i + 2];
+    let k = colors.get(c);
+    if (k === undefined) {
+      if (colors.size === 256) return Promise.resolve(null);
+      colors.set(c, k = colors.size); rgb.push(data[i], data[i + 1], data[i + 2]);
+    }
+    idx[p] = k;
+  }
+  const bits = bitsFor(colors.size), per = 8 / bits, rowBytes = Math.ceil(width / per), start = 5 + rgb.length;
+  const bytes = new Uint8Array(start + rowBytes * height);
+  bytes.set([width >> 8, width & 255, height >> 8, height & 255, colors.size - 1, ...rgb]);
+  for (let y = 0, p = 0; y < height; y++)
+    for (let x = 0; x < width; x++, p++) bytes[start + y * rowBytes + Math.floor(x / per)] |= idx[p] << 8 - bits - x % per * bits;
+  // Back to front, so each row is XORed with the row above as it was before.
+  for (let i = bytes.length - 1; i >= start + rowBytes; i--) bytes[i] ^= bytes[i - rowBytes];
+  return pipe(bytes, new CompressionStream('deflate-raw')).then(z => LINK + toBase64url(z));
+}
+function decodePicture(hash) {
+  // atob throws right away, so it goes inside the chain with the failures that come later.
+  return Promise.resolve(hash.slice(LINK.length)).then(fromBase64url).then(z => pipe(z, new DecompressionStream('deflate-raw'))).then(bytes => {
+    const width = bytes[0] << 8 | bytes[1], height = bytes[2] << 8 | bytes[3], n = bytes[4] + 1, start = 5 + 3 * n;
+    const bits = bitsFor(n), per = 8 / bits, rowBytes = Math.ceil(width / per), mask = (1 << bits) - 1;
+    if (!width || !height || bytes.length !== start + rowBytes * height) throw new Error('Sizes don’t add up');
+    for (let i = start + rowBytes; i < bytes.length; i++) bytes[i] ^= bytes[i - rowBytes];
+    const data = new Uint8ClampedArray(width * height * 4);
+    for (let y = 0, p = 0; y < height; y++) for (let x = 0; x < width; x++, p++) {
+      const k = bytes[start + y * rowBytes + Math.floor(x / per)] >> 8 - bits - x % per * bits & mask;
+      if (k >= n) throw new Error('A pixel has color ' + (k + 1) + ' of ' + n);
+      data.set(bytes.subarray(5 + 3 * k, 8 + 3 * k), p * 4); data[p * 4 + 3] = 255;
+    }
+    return new ImageData(data, width, height);
+  });
+}
+// Opens the link's picture and takes it out of the address, which would otherwise go stale with the first change.
+function openLink(hash) {
+  decodePicture(hash).then(img => {
+    app.openPicture(img); setDoc('untitled', FORMATS[0], false);
+    history.replaceState(history.state, '', addressBase());
+  }, err => {
+    // Inflating can fail with no message at all, and none of the messages are for a person.
+    console.error('Paintbox link:', err);
+    app.hint('Could not read the picture in this link. It may have been cut short.');
+  });
+}
+// Safari takes the clipboard only during the click, so the clipboard item waits on the picture being encoded.
+function copyLink() {
+  if (!clipboardWrites()) { app.hint('This browser can’t put a link on the clipboard.'); return; }
+  const link = encodePicture(app.picture()).then(hash => {
+    const base = addressBase();
+    if (!hash) throw new Error('This picture has more than 256 colors, too many for a link. Save it to share it as a file.');
+    if (base.length + hash.length > MAX_ADDRESS) throw new Error('This picture is too detailed for a link. Save it to share it as a file.');
+    return base + hash;
+  });
+  navigator.clipboard.write([new ClipboardItem({ 'text/plain': link.then(url => new Blob([url], { type: 'text/plain' })) })]).then(
+    () => app.hint('Copied a link to this picture.'),
+    err => link.then(() => app.hint('Could not copy the link: ' + err.message), e => app.hint(e.message)));
+}
+// A link pasted into the address bar of a page that is already open.
+window.addEventListener('hashchange', () => {
+  const hash = location.hash;
+  if (!hash.startsWith(LINK)) return;
+  confirmDiscard().then(ok => { if (ok) openLink(hash); else history.replaceState(history.state, '', addressBase()); });
+});
+
 /* ---------- clipboard ---------- */
 // Browsers hand pictures to the clipboard only through the asynchronous Clipboard API.
 const clipboardWrites = () => !!(navigator.clipboard && navigator.clipboard.write && window.ClipboardItem);
@@ -251,7 +340,7 @@ function about() {
   const b = el('div');
   b.append(el('div', 'about-mark', 'Paintbox'),
     el('p', null, 'A bitmap paint program in the classic style: sixteen tools, a 28-color palette, hard-edged pixels and no anti-aliasing.'),
-    el('p', null, 'Pictures stay on this computer. Open reads a file you choose; Save downloads one.'));
+    el('p', null, 'Pictures stay on this computer. Open reads a file you choose; Save downloads one. File ▸ Copy Link copies a link that holds the picture, in a part of the address browsers don’t send to the server.'));
   app.dialog('About Paintbox', b, [{ label: 'OK', value: null, primary: true }]);
 }
 
@@ -260,7 +349,7 @@ window.addEventListener('beforeunload', e => { if (app.state().dirty) e.preventD
 return {
   name: 'web',
   mac: MAC,
-  start(a) { app = a; updateTitle(false); },
+  start(a) { app = a; updateTitle(false); if (location.hash.startsWith(LINK)) openLink(location.hash); },
   stateChanged(st) { updateTitle(st.dirty); if (openIdx >= 0) refreshMenu(st); },
   editColor(color) { colorIn.value = color; colorIn.showPicker(); }
 };

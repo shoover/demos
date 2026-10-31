@@ -13,7 +13,9 @@ const MENUS = [
     '-',
     { label: 'Close', cmd: 'close', key: 'Mod+W', only: 'mac' },
     { label: 'Save', cmd: 'save', key: 'Mod+S' },
-    { label: 'Save As…', cmd: 'saveAs', key: 'Mod+Shift+S' }]],
+    { label: 'Save As…', cmd: 'saveAs', key: 'Mod+Shift+S' },
+    '-',
+    { label: 'Copy Link', cmd: 'copyLink', only: 'web' }]],
   ['Edit', [
     { label: 'Undo', cmd: 'undo', key: 'Mod+Z', enabled: 'canUndo' },
     { label: 'Redo', cmd: 'redo', key: 'Mod+Shift+Z', enabled: 'canRedo' },
