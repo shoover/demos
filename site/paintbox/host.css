@@ -58,3 +58,6 @@ body{
 
 /* The color picker opens from this input; it has to be rendered for showPicker() to anchor it. */
 .offscreen{position:fixed;left:16px;bottom:16px;width:1px;height:1px;opacity:0;pointer-events:none;border:0;padding:0}
+/* Open Link's field takes a long link. */
+.field.link{grid-template-columns:auto minmax(0,1fr)}
+.field.link input{width:380px;max-width:100%}

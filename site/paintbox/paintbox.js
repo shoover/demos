@@ -877,12 +877,13 @@ document.addEventListener('keydown', e => {
 /* ---------- host bridge ---------- */
 const isEditingText = () => !!document.activeElement && document.activeElement.matches('input, textarea');
 // The flags the host's menus are enabled and checked by (see shared/menus.js).
+const LINKS = PaintboxLink.available();
 function pageState() {
   return {
     canUndo: undoS.length > 0 || !!(sel || tb || poly || curve), canRedo: redoS.length > 0, hasSelection: !!sel,
     dirty: S.dirty, grid: S.grid, gridAvailable: zoom >= GRID_MIN_ZOOM, actualSize: zoom === 1, largeSize: zoom === LARGE_SIZE,
     opaque: !S.selTransparent, toolBox: view.tools, colorBox: view.colors, statusBar: view.status,
-    editingText: isEditingText(), modal: modal > 0
+    editingText: isEditingText(), modal: modal > 0, linksAvailable: LINKS
   };
 }
 // Tells the host when the state changed. Coalesced, and sent only when something changed.

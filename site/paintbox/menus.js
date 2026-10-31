@@ -10,12 +10,13 @@ const MENUS = [
   ['File', [
     { label: 'New', cmd: 'new', key: 'Mod+N', webKey: null },
     { label: 'Open…', cmd: 'open', key: 'Mod+O' },
+    { label: 'Open Link…', cmd: 'openLink', enabled: 'linksAvailable' },
     '-',
     { label: 'Close', cmd: 'close', key: 'Mod+W', only: 'mac' },
     { label: 'Save', cmd: 'save', key: 'Mod+S' },
     { label: 'Save As…', cmd: 'saveAs', key: 'Mod+Shift+S' },
     '-',
-    { label: 'Copy Link', cmd: 'copyLink', only: 'web' }]],
+    { label: 'Copy Link', cmd: 'copyLink', enabled: 'linksAvailable' }]],
   ['Edit', [
     { label: 'Undo', cmd: 'undo', key: 'Mod+Z', enabled: 'canUndo' },
     { label: 'Redo', cmd: 'redo', key: 'Mod+Shift+Z', enabled: 'canRedo' },
